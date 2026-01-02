@@ -7,6 +7,12 @@ A standalone CLI providing common agent operations like memory management, messa
 ## Installation
 
 ```bash
+just install #if you have the just commandrunner installed
+```
+
+or via cargo
+
+```bash
 cargo install --path .
 ```
 
