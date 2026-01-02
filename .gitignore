@@ -14,3 +14,6 @@ Thumbs.db
 # Local
 .env
 .env.local
+
+# bv (beads viewer) local config and caches
+.bv/
