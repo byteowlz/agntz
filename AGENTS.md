@@ -6,8 +6,9 @@ agntz is a CLI toolkit for AI coding agents. It provides unified access to:
 
 - **Memory** - Store and retrieve context (wraps mmry)
 - **Coordination** - Agent-to-agent messaging and file reservations (wraps mailz)
-- **Issues** - Task tracking and triage (wraps bd/bv)
+- **Issues** - Task tracking (wraps trx)
 - **Search** - Agent session history search (wraps cass)
+- **Schedule** - Task scheduling (wraps skdlr)
 - **Tools** - Install and manage agent tools
 
 agntz is designed to be used by AI agents in coding environments like octo, Claude Code, Cursor, etc.
@@ -18,6 +19,8 @@ agntz is designed to be used by AI agents in coding environments like octo, Clau
 # Memory
 agntz memory add "learned something important" -c category
 agntz memory search "query"
+agntz memory list                      # List all memories
+agntz memory list -c category          # Filter by category
 agntz memory export                    # Export to .memories/export.json
 agntz memory export --format md        # Export as markdown
 agntz memory import .memories/export.json
@@ -33,12 +36,17 @@ agntz reservations
 agntz release src/file.rs
 
 # Issues
-agntz issues                           # List issues (bd list)
-agntz ready                            # Show unblocked issues (bd ready)
-agntz triage                           # Cross-repo triage (bv)
+agntz issues                           # List issues (trx list)
+agntz ready                            # Show unblocked issues (trx ready)
 
 # History Search
 agntz search "how did I fix..."        # Search agent session history
+
+# Schedule
+agntz schedule list                    # List schedules
+agntz schedule add job -s "0 * * * *" -c "cmd"  # Add
+agntz schedule run job                 # Trigger now
+agntz schedule logs job                # View history
 
 # Tools
 agntz tools list
@@ -64,9 +72,9 @@ agntz wraps these external tools (install via `agntz tools install`):
 |------|---------|
 | mmry | Memory storage and search |
 | mailz | Agent coordination, messaging, file reservations |
-| bd | Issue tracking (beads) |
-| bv | Issue triage and analytics |
+| trx | Issue tracking |
 | cass | Agent session history search |
+| skdlr | Task scheduling |
 
 ## For AI Agents
 

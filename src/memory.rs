@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::Deserialize;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::fs;
 
 #[derive(Subcommand)]
 pub enum MemoryCommand {
@@ -61,6 +61,22 @@ pub enum MemoryCommand {
 
     /// List available stores
     Stores,
+
+    /// List memories
+    List {
+        /// Maximum number of results
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Filter by category
+        #[arg(short, long)]
+        category: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include full embeddings in JSON output
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 pub async fn handle(command: MemoryCommand) -> Result<()> {
@@ -77,10 +93,20 @@ pub async fn handle(command: MemoryCommand) -> Result<()> {
             limit,
             json,
         } => handle_search(query, mode, limit, json).await,
-        MemoryCommand::Export { output, format, all } => handle_export(output, format, all).await,
+        MemoryCommand::Export {
+            output,
+            format,
+            all,
+        } => handle_export(output, format, all).await,
         MemoryCommand::Import { file } => handle_import(file).await,
         MemoryCommand::Stats => handle_stats().await,
         MemoryCommand::Stores => handle_stores().await,
+        MemoryCommand::List {
+            limit,
+            category,
+            json,
+            full,
+        } => handle_list(limit, category, json, full).await,
     }
 }
 
@@ -191,7 +217,7 @@ struct Memory {
 async fn export_markdown(output: &PathBuf, all: bool) -> Result<()> {
     // First export to JSON, then convert
     let temp_json = std::env::temp_dir().join("agnt_export_temp.json");
-    
+
     let mut args = vec![
         "export".to_string(),
         "-o".to_string(),
@@ -206,23 +232,29 @@ async fn export_markdown(output: &PathBuf, all: bool) -> Result<()> {
 
     // Read and convert to markdown
     let json_content = fs::read_to_string(&temp_json)?;
-    let memories: Vec<Memory> = serde_json::from_str(&json_content)
-        .unwrap_or_default();
+    let memories: Vec<Memory> = serde_json::from_str(&json_content).unwrap_or_default();
 
     let mut md = String::new();
     md.push_str("# Memories\n\n");
 
     // Group by category
-    let mut by_category: std::collections::HashMap<String, Vec<&Memory>> = std::collections::HashMap::new();
+    let mut by_category: std::collections::HashMap<String, Vec<&Memory>> =
+        std::collections::HashMap::new();
     for mem in &memories {
-        let cat = mem.category.clone().unwrap_or_else(|| "uncategorized".to_string());
+        let cat = mem
+            .category
+            .clone()
+            .unwrap_or_else(|| "uncategorized".to_string());
         by_category.entry(cat).or_default().push(mem);
     }
 
     for (category, mems) in by_category {
         md.push_str(&format!("## {}\n\n", category));
         for mem in mems {
-            let importance = mem.importance.map(|i| format!(" [i:{}]", i)).unwrap_or_default();
+            let importance = mem
+                .importance
+                .map(|i| format!(" [i:{}]", i))
+                .unwrap_or_default();
             md.push_str(&format!("- {}{}\n", mem.content.trim(), importance));
         }
         md.push('\n');
@@ -231,15 +263,16 @@ async fn export_markdown(output: &PathBuf, all: bool) -> Result<()> {
     fs::write(output, &md)?;
     fs::remove_file(&temp_json).ok();
 
-    println!("Exported {} memories to {}", memories.len(), output.display());
+    println!(
+        "Exported {} memories to {}",
+        memories.len(),
+        output.display()
+    );
     Ok(())
 }
 
 async fn handle_import(file: PathBuf) -> Result<()> {
-    let args = vec![
-        "import".to_string(),
-        file.to_string_lossy().to_string(),
-    ];
+    let args = vec!["import".to_string(), file.to_string_lossy().to_string()];
 
     run_mmry(&args)
 }
@@ -249,12 +282,101 @@ async fn handle_stats() -> Result<()> {
 }
 
 async fn handle_stores() -> Result<()> {
-    run_mmry(&["stores".to_string()])
+    // Don't use auto-store for listing stores
+    run_mmry_raw(&["stores", "list"])
+}
+
+async fn handle_list(
+    limit: Option<usize>,
+    category: Option<String>,
+    json: bool,
+    full: bool,
+) -> Result<()> {
+    let mut args = vec!["ls".to_string()];
+
+    if let Some(l) = limit {
+        args.push("--limit".to_string());
+        args.push(l.to_string());
+    }
+
+    if let Some(cat) = category {
+        args.push("--category".to_string());
+        args.push(cat);
+    }
+
+    if json {
+        args.push("--json".to_string());
+    }
+
+    if full {
+        args.push("--full".to_string());
+    }
+
+    run_mmry(&args)
+}
+
+/// Run mmry without auto-store detection
+fn run_mmry_raw(args: &[&str]) -> Result<()> {
+    let output = Command::new("mmry")
+        .args(args)
+        .output()
+        .context("failed to run mmry - is mmry installed?")?;
+
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    if !output.status.success() {
+        anyhow::bail!("mmry command failed");
+    }
+
+    Ok(())
+}
+
+/// Get the current repo name from git remote or directory name
+fn get_repo_name() -> Option<String> {
+    // Try to get repo name from git remote
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout);
+        // Extract repo name from URL (handles both SSH and HTTPS)
+        // e.g., git@github.com:user/repo.git -> repo
+        // e.g., https://github.com/user/repo.git -> repo
+        let name = url
+            .trim()
+            .trim_end_matches(".git")
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string());
+        if name.is_some() {
+            return name;
+        }
+    }
+
+    // Fallback: use current directory name
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
 }
 
 fn run_mmry(args: &[String]) -> Result<()> {
+    let mut full_args = Vec::new();
+
+    // Auto-detect store from repo name
+    if let Some(repo) = get_repo_name() {
+        full_args.push("--store".to_string());
+        full_args.push(repo);
+    }
+
+    full_args.extend(args.iter().cloned());
+
     let output = Command::new("mmry")
-        .args(args)
+        .args(&full_args)
         .output()
         .context("failed to run mmry - is mmry installed?")?;
 

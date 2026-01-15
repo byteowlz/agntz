@@ -59,12 +59,12 @@ pub enum IssuesCommand {
 
 pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
     match command {
-        None => run_bd(&["list"]),
+        None => run_trx(&["list"]),
         Some(IssuesCommand::List { status, r#type }) => {
             let mut args = vec!["list"];
             let status_str;
             let type_str;
-            
+
             if let Some(s) = &status {
                 status_str = s.clone();
                 args.push("--status");
@@ -72,10 +72,10 @@ pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
             }
             if let Some(t) = &r#type {
                 type_str = t.clone();
-                args.push("--type");
+                args.push("--issue-type");
                 args.push(&type_str);
             }
-            run_bd(&args)
+            run_trx(&args)
         }
         Some(IssuesCommand::Create {
             title,
@@ -87,20 +87,24 @@ pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
             let priority_str = priority.to_string();
             args.push("-p");
             args.push(&priority_str);
-            
+
             let desc_str;
             if let Some(d) = &description {
                 desc_str = d.clone();
                 args.push("-d");
                 args.push(&desc_str);
             }
-            run_bd(&args)
+            run_trx(&args)
         }
-        Some(IssuesCommand::Update { id, status, priority }) => {
+        Some(IssuesCommand::Update {
+            id,
+            status,
+            priority,
+        }) => {
             let mut args = vec!["update", &id];
             let status_str;
             let priority_str;
-            
+
             if let Some(s) = &status {
                 status_str = s.clone();
                 args.push("--status");
@@ -111,28 +115,28 @@ pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
                 args.push("--priority");
                 args.push(&priority_str);
             }
-            run_bd(&args)
+            run_trx(&args)
         }
         Some(IssuesCommand::Close { id, reason }) => {
             let mut args = vec!["close", &id];
             let reason_str;
-            
+
             if let Some(r) = &reason {
                 reason_str = r.clone();
                 args.push("-r");
                 args.push(&reason_str);
             }
-            run_bd(&args)
+            run_trx(&args)
         }
-        Some(IssuesCommand::Show { id }) => run_bd(&["show", &id]),
+        Some(IssuesCommand::Show { id }) => run_trx(&["show", &id]),
     }
 }
 
-fn run_bd(args: &[&str]) -> Result<()> {
-    let output = Command::new("bd")
+fn run_trx(args: &[&str]) -> Result<()> {
+    let output = Command::new("trx")
         .args(args)
         .output()
-        .context("failed to run bd - is beads installed?")?;
+        .context("failed to run trx - is trx installed?")?;
 
     print!("{}", String::from_utf8_lossy(&output.stdout));
     if !output.stderr.is_empty() {
@@ -140,7 +144,7 @@ fn run_bd(args: &[&str]) -> Result<()> {
     }
 
     if !output.status.success() {
-        // Don't fail on non-zero exit for bd (it might just mean no results)
+        // Don't fail on non-zero exit for trx (it might just mean no results)
     }
 
     Ok(())

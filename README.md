@@ -48,7 +48,7 @@ agntz reservations                                  # List active reservations
 agntz release src/main.rs                          # Release reservation
 ```
 
-### Issues (wraps bd/beads)
+### Issues (wraps trx)
 
 ```bash
 agntz issues                        # List all issues
@@ -58,14 +58,6 @@ agntz issues update <id> --status in_progress
 agntz issues close <id> -r "reason"
 agntz issues show <id>
 agntz ready                         # Show unblocked issues
-```
-
-### Triage (wraps bv)
-
-```bash
-agntz triage                        # Cross-repo issue triage
-agntz triage --next                 # Show next recommended item
-agntz triage --refresh              # Regenerate workspace.yaml first
 ```
 
 ### Search (wraps cass)
@@ -79,9 +71,25 @@ agntz search "query" --days 7       # Limit to last 7 days
 
 ```bash
 agntz tools list                    # List available/installed tools
-agntz tools install <tool>          # Install a tool (mmry, bd, bv, cass, mailz)
+agntz tools install <tool>          # Install a tool (mmry, trx, cass, mailz)
 agntz tools update <tool>           # Update a tool
 agntz tools doctor                  # Check tool health
+```
+
+### Schedule (wraps skdlr)
+
+```bash
+agntz schedule add backup -s "0 2 * * *" -c "restic backup ~"   # Add task
+agntz schedule list                                              # List all
+agntz schedule show backup                                       # Show details
+agntz schedule edit backup -s "0 3 * * *"                       # Edit schedule
+agntz schedule enable backup                                     # Enable
+agntz schedule disable backup                                    # Disable
+agntz schedule run backup                                        # Trigger now
+agntz schedule logs backup                                       # View history
+agntz schedule status                                            # Overview
+agntz schedule next                                              # Upcoming runs
+agntz schedule remove backup -y                                  # Delete
 ```
 
 ## Dependencies
@@ -89,10 +97,10 @@ agntz tools doctor                  # Check tool health
 agntz wraps several external tools. Install them as needed:
 
 - **[mmry](https://github.com/byteowlz/mmry)** - Memory system for humans and AI agents
-- **[beads](https://github.com/steveyegge/beads)** (bd) - Distributed git-backed issue tracker
-- **[beads_viewer](https://github.com/Dicklesworthstone/beads_viewer)** (bv) - TUI for beads with graph analytics
+- **[trx](https://github.com/byteowlz/trx)** - Minimal git-backed issue tracker
 - **[cass](https://github.com/Dicklesworthstone/coding_agent_session_search)** - Agent session history search
 - **[mailz](https://github.com/byteowlz/mailz)** - Agent coordination messaging
+- **[skdlr](https://github.com/byteowlz/skdlr)** - Cross-platform task scheduler
 
 Install all with:
 

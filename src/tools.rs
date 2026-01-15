@@ -9,7 +9,7 @@ pub enum ToolsCommand {
 
     /// Install a tool
     Install {
-        /// Tool name (mmry, mailz, bd, bv, cass, all)
+        /// Tool name (mmry, mailz, trx, cass, all)
         tool: String,
     },
 
@@ -44,16 +44,10 @@ const TOOLS: &[ToolInfo] = &[
         install_cmd: "cargo install mailz",
     },
     ToolInfo {
-        name: "bd",
-        description: "Issue tracking (beads)",
-        binary: "bd",
-        install_cmd: "cargo install beads",
-    },
-    ToolInfo {
-        name: "bv",
-        description: "Issue triage and analytics",
-        binary: "bv",
-        install_cmd: "cargo install beads-viewer",
+        name: "trx",
+        description: "Issue tracking",
+        binary: "trx",
+        install_cmd: "cargo install trx",
     },
     ToolInfo {
         name: "cass",
@@ -74,16 +68,20 @@ pub async fn handle(command: ToolsCommand) -> Result<()> {
 
 fn handle_list() -> Result<()> {
     println!("Available tools:\n");
-    
+
     for tool in TOOLS {
         let installed = is_installed(tool.binary);
-        let status = if installed { "[installed]" } else { "[not installed]" };
+        let status = if installed {
+            "[installed]"
+        } else {
+            "[not installed]"
+        };
         println!("  {} {} - {}", tool.name, status, tool.description);
     }
-    
+
     println!("\nInstall with: agntz tools install <name>");
     println!("Install all:  agntz tools install all");
-    
+
     Ok(())
 }
 
@@ -100,7 +98,10 @@ async fn handle_install(tool: &str) -> Result<()> {
         Some(t) => install_tool(t).await,
         None => {
             println!("Unknown tool: {}", tool);
-            println!("Available: {}", TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", "));
+            println!(
+                "Available: {}",
+                TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", ")
+            );
             Ok(())
         }
     }
@@ -113,7 +114,7 @@ async fn install_tool(tool: &ToolInfo) -> Result<()> {
     }
 
     println!("Installing {}...", tool.name);
-    
+
     let parts: Vec<&str> = tool.install_cmd.split_whitespace().collect();
     let output = Command::new(parts[0])
         .args(&parts[1..])
@@ -151,12 +152,12 @@ async fn handle_update(tool: &str) -> Result<()> {
 
 async fn update_tool(tool: &ToolInfo) -> Result<()> {
     println!("Updating {}...", tool.name);
-    
+
     // For cargo-installed tools, reinstall with --force
     let parts: Vec<&str> = tool.install_cmd.split_whitespace().collect();
     let mut args: Vec<&str> = parts[1..].to_vec();
     args.push("--force");
-    
+
     let output = Command::new(parts[0])
         .args(&args)
         .status()
@@ -173,29 +174,29 @@ async fn update_tool(tool: &ToolInfo) -> Result<()> {
 
 fn handle_doctor() -> Result<()> {
     println!("Checking tool health...\n");
-    
+
     let mut all_ok = true;
-    
+
     for tool in TOOLS {
         let installed = is_installed(tool.binary);
         let status = if installed { "OK" } else { "MISSING" };
         let icon = if installed { "+" } else { "x" };
-        
+
         println!("  [{}] {}: {}", icon, tool.name, status);
-        
+
         if !installed {
             all_ok = false;
         }
     }
-    
+
     println!();
-    
+
     if all_ok {
         println!("All tools are installed and ready.");
     } else {
         println!("Some tools are missing. Install with: agntz tools install all");
     }
-    
+
     Ok(())
 }
 
