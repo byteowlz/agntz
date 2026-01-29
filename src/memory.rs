@@ -77,6 +77,13 @@ pub enum MemoryCommand {
         #[arg(long)]
         full: bool,
     },
+
+    /// Remove a memory
+    #[command(alias = "rm")]
+    Remove {
+        /// Memory ID to remove
+        id: String,
+    },
 }
 
 pub async fn handle(command: MemoryCommand) -> Result<()> {
@@ -107,6 +114,7 @@ pub async fn handle(command: MemoryCommand) -> Result<()> {
             json,
             full,
         } => handle_list(limit, category, json, full).await,
+        MemoryCommand::Remove { id } => handle_remove(id).await,
     }
 }
 
@@ -313,6 +321,10 @@ async fn handle_list(
     }
 
     run_mmry(&args)
+}
+
+async fn handle_remove(id: String) -> Result<()> {
+    run_mmry(&["rm".to_string(), id])
 }
 
 /// Run mmry without auto-store detection

@@ -9,7 +9,7 @@ pub enum ToolsCommand {
 
     /// Install a tool
     Install {
-        /// Tool name (mmry, mailz, trx, cass, all)
+        /// Tool name (mmry, mailz, trx, hstry, all)
         tool: String,
     },
 
@@ -50,10 +50,10 @@ const TOOLS: &[ToolInfo] = &[
         install_cmd: "cargo install trx",
     },
     ToolInfo {
-        name: "cass",
+        name: "hstry",
         description: "Agent session history search",
-        binary: "cass",
-        install_cmd: "cargo install coding-agent-session-search",
+        binary: "hstry",
+        install_cmd: "cargo install hstry-cli",
     },
 ];
 

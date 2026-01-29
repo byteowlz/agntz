@@ -6,8 +6,8 @@ agntz is a CLI toolkit for AI coding agents. It provides unified access to:
 
 - **Memory** - Store and retrieve context (wraps mmry)
 - **Coordination** - Agent-to-agent messaging and file reservations (wraps mailz)
-- **Issues** - Task tracking (wraps trx)
-- **Search** - Agent session history search (wraps cass)
+- **Tasks** - Task tracking (wraps trx)
+- **Search** - Agent session history search (wraps hstry)
 - **Schedule** - Task scheduling (wraps skdlr)
 - **Tools** - Install and manage agent tools
 
@@ -35,12 +35,12 @@ agntz reserve src/file.rs --reason "refactoring"
 agntz reservations
 agntz release src/file.rs
 
-# Issues
-agntz issues                           # List issues (trx list)
-agntz ready                            # Show unblocked issues (trx ready)
+# Tasks
+agntz tasks                            # List tasks (trx list)
+agntz ready                            # Show unblocked tasks (trx ready)
 
 # History Search
-agntz search "how did I fix..."        # Search agent session history
+agntz search "how did I fix..."        # Search agent session history (defaults to current workspace)
 
 # Schedule
 agntz schedule list                    # List schedules
@@ -73,7 +73,7 @@ agntz wraps these external tools (install via `agntz tools install`):
 | mmry | Memory storage and search |
 | mailz | Agent coordination, messaging, file reservations |
 | trx | Issue tracking |
-| cass | Agent session history search |
+| hstry | Agent session history search |
 | skdlr | Task scheduling |
 
 ## For AI Agents

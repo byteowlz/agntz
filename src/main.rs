@@ -27,13 +27,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Memory operations (wraps mmry)
+    /// Memory operations
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
 
-    /// Mail and messaging (wraps mailz)
+    /// Mail and messaging
     Mail {
         #[command(subcommand)]
         command: MailCommand,
@@ -63,25 +63,47 @@ enum Commands {
         all: bool,
     },
 
-    /// List issues (wraps trx list)
-    Issues {
+    /// Task tracking
+    #[command(alias = "issues")]
+    Tasks {
         #[command(subcommand)]
         command: Option<IssuesCommand>,
     },
 
-    /// Show unblocked issues (wraps trx ready)
+    /// Show unblocked tasks
     Ready,
 
-    /// Search agent session history (wraps cass)
+    /// Search agent session history
     Search {
         /// Search query
         query: String,
-        /// Limit to specific repo context
-        #[arg(short, long)]
-        repo: Option<String>,
+        /// Limit to specific workspace path (defaults to current repo/dir)
+        #[arg(short, long, alias = "repo")]
+        workspace: Option<String>,
         /// Limit to last N days
         #[arg(long)]
         days: Option<u32>,
+        /// Limit to a specific session/conversation ID
+        #[arg(long)]
+        session: Option<String>,
+        /// Maximum results to return
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+        /// Search all workspaces (disables default workspace filter)
+        #[arg(long)]
+        all_workspaces: bool,
+        /// Include tool calls/results
+        #[arg(long)]
+        include_tools: bool,
+        /// Include system context (AGENTS.md, etc.)
+        #[arg(long)]
+        include_system: bool,
+        /// Disable result deduplication
+        #[arg(long)]
+        no_dedup: bool,
+        /// Output raw JSON results
+        #[arg(long)]
+        json: bool,
     },
 
     /// Manage agent tools
@@ -90,7 +112,7 @@ enum Commands {
         command: ToolsCommand,
     },
 
-    /// Task scheduling (wraps skdlr)
+    /// Task scheduling
     Schedule {
         #[command(subcommand)]
         command: ScheduleCommand,
@@ -120,9 +142,34 @@ async fn main() -> Result<()> {
         Commands::Reserve { files, reason, ttl } => handle_reserve(files, reason, ttl).await,
         Commands::Reservations => handle_reservations().await,
         Commands::Release { files, all } => handle_release(files, all).await,
-        Commands::Issues { command } => issues::handle(command).await,
+        Commands::Tasks { command } => issues::handle(command).await,
         Commands::Ready => handle_ready().await,
-        Commands::Search { query, repo, days } => handle_search(query, repo, days).await,
+        Commands::Search {
+            query,
+            workspace,
+            days,
+            session,
+            limit,
+            all_workspaces,
+            include_tools,
+            include_system,
+            no_dedup,
+            json,
+        } => {
+            handle_search(
+                query,
+                workspace,
+                days,
+                session,
+                limit,
+                all_workspaces,
+                include_tools,
+                include_system,
+                no_dedup,
+                json,
+            )
+            .await
+        }
         Commands::Tools { command } => tools::handle(command).await,
         Commands::Schedule { command } => schedule::handle(command).await,
         Commands::Completions { shell } => handle_completions(shell),
@@ -180,30 +227,222 @@ async fn handle_ready() -> Result<()> {
     Ok(())
 }
 
-async fn handle_search(query: String, repo: Option<String>, days: Option<u32>) -> Result<()> {
-    let mut args = vec!["search".to_string(), query];
+#[derive(serde::Deserialize)]
+struct HstryJsonResponse<T> {
+    ok: bool,
+    result: Option<T>,
+    error: Option<String>,
+}
 
-    if let Some(repo) = repo {
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct HstrySearchHit {
+    message_id: String,
+    conversation_id: String,
+    message_idx: i32,
+    role: String,
+    content: String,
+    snippet: String,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    conv_created_at: chrono::DateTime<chrono::Utc>,
+    conv_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    score: f32,
+    source_id: String,
+    external_id: Option<String>,
+    title: Option<String>,
+    workspace: Option<String>,
+    source_adapter: String,
+    source_path: Option<String>,
+    host: Option<String>,
+}
+
+async fn handle_search(
+    query: String,
+    workspace: Option<String>,
+    days: Option<u32>,
+    session: Option<String>,
+    limit: usize,
+    all_workspaces: bool,
+    include_tools: bool,
+    include_system: bool,
+    no_dedup: bool,
+    json: bool,
+) -> Result<()> {
+    let mut args = vec!["search".to_string(), query.clone(), "--json".to_string()];
+
+    let workspace_filter = if all_workspaces {
+        None
+    } else {
+        workspace.or_else(resolve_default_workspace)
+    };
+
+    if let Some(workspace) = workspace_filter.as_ref() {
         args.push("--workspace".to_string());
-        args.push(repo);
+        args.push(workspace.clone());
     }
 
-    if let Some(days) = days {
-        args.push("--days".to_string());
-        args.push(days.to_string());
+    let dedup = !no_dedup;
+    if dedup {
+        args.push("--dedup".to_string());
+    }
+    if !include_tools {
+        args.push("--no-tools".to_string());
+    }
+    if include_system {
+        args.push("--include-system".to_string());
     }
 
-    let output = Command::new("cass")
+    let fetch_limit = if session.is_some() {
+        (limit.saturating_mul(10)).clamp(limit.max(20), 1000)
+    } else {
+        limit
+    };
+    args.push("--limit".to_string());
+    args.push(fetch_limit.to_string());
+
+    let output = Command::new("hstry")
         .args(&args)
         .output()
-        .context("failed to run cass - is coding_agent_session_search installed?")?;
+        .context("failed to run hstry - is hstry installed and the service running?")?;
 
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("hstry search failed: {stderr}");
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response: HstryJsonResponse<Vec<HstrySearchHit>> =
+        serde_json::from_str(&stdout).context("failed to parse hstry search output")?;
+
+    if !response.ok {
+        let error = response
+            .error
+            .unwrap_or_else(|| "hstry search failed".to_string());
+        anyhow::bail!(error);
+    }
+
+    let mut hits = response.result.unwrap_or_default();
+    hits = filter_hits(hits, session.as_deref(), days);
+    hits.truncate(limit);
+
+    if json {
+        let payload = serde_json::json!({ "hits": hits });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    print_compact_hits(&hits);
     Ok(())
+}
+
+fn resolve_default_workspace() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+
+    std::env::current_dir()
+        .ok()
+        .map(|dir| dir.to_string_lossy().to_string())
+}
+
+fn filter_hits(
+    hits: Vec<HstrySearchHit>,
+    session: Option<&str>,
+    days: Option<u32>,
+) -> Vec<HstrySearchHit> {
+    let mut filtered = Vec::new();
+    let cutoff = days.map(|d| chrono::Utc::now() - chrono::Duration::days(i64::from(d)));
+
+    for hit in hits {
+        if let Some(session_id) = session {
+            let session_match = hit
+                .external_id
+                .as_deref()
+                .map(|id| id == session_id)
+                .unwrap_or(false)
+                || hit.conversation_id == session_id
+                || hit
+                    .source_path
+                    .as_deref()
+                    .map(|path| path.contains(session_id))
+                    .unwrap_or(false);
+            if !session_match {
+                continue;
+            }
+        }
+
+        if let Some(cutoff) = cutoff {
+            let timestamp = hit
+                .created_at
+                .or(hit.conv_updated_at)
+                .unwrap_or(hit.conv_created_at);
+            if timestamp < cutoff {
+                continue;
+            }
+        }
+
+        filtered.push(hit);
+    }
+
+    filtered
+}
+
+fn print_compact_hits(hits: &[HstrySearchHit]) {
+    if hits.is_empty() {
+        println!("No results found.");
+        return;
+    }
+
+    for hit in hits {
+        let session_id = hit
+            .external_id
+            .as_deref()
+            .unwrap_or(hit.conversation_id.as_str());
+        let title = compact_label(hit.title.as_deref().unwrap_or("Untitled"), 40);
+        let snippet = compact_snippet(&hit.snippet, 160);
+        let workspace = hit
+            .workspace
+            .as_deref()
+            .and_then(|w| w.split('/').last())
+            .unwrap_or("-");
+
+        println!(
+            "{score:>5.2} {source} {role} {session} #{idx} {workspace} {title} - {snippet}",
+            score = hit.score,
+            source = hit.source_id,
+            role = hit.role,
+            session = session_id,
+            idx = hit.message_idx,
+            workspace = workspace,
+            title = title
+        );
+    }
+}
+
+fn compact_snippet(snippet: &str, max_len: usize) -> String {
+    let mut collapsed = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() > max_len {
+        collapsed.truncate(max_len.saturating_sub(3));
+        collapsed.push_str("...");
+    }
+    collapsed
+}
+
+fn compact_label(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+    let mut trimmed = value.to_string();
+    trimmed.truncate(max_len.saturating_sub(3));
+    trimmed.push_str("...");
+    trimmed
 }
 
 fn handle_completions(shell: clap_complete::Shell) -> Result<()> {

@@ -48,30 +48,34 @@ agntz reservations                                  # List active reservations
 agntz release src/main.rs                          # Release reservation
 ```
 
-### Issues (wraps trx)
+### Tasks (wraps trx)
 
 ```bash
-agntz issues                        # List all issues
-agntz issues list                   # List all issues
-agntz issues create "title" -t bug -p 1
-agntz issues update <id> --status in_progress
-agntz issues close <id> -r "reason"
-agntz issues show <id>
-agntz ready                         # Show unblocked issues
+agntz tasks                         # List all tasks
+agntz tasks list                    # List all tasks
+agntz tasks create "title" -t bug -p 1
+agntz tasks update <id> --status in_progress
+agntz tasks close <id> -r "reason"
+agntz tasks show <id>
+agntz ready                         # Show unblocked tasks
 ```
 
-### Search (wraps cass)
+### Search (wraps hstry)
+
+Defaults to the current repo/dir unless `--all-workspaces` is set.
 
 ```bash
 agntz search "query"                # Search agent session history
 agntz search "query" --days 7       # Limit to last 7 days
+agntz search "query" --session <id> # Search within a session
+agntz search "query" --all-workspaces
 ```
 
 ### Tools
 
 ```bash
 agntz tools list                    # List available/installed tools
-agntz tools install <tool>          # Install a tool (mmry, trx, cass, mailz)
+agntz tools install <tool>          # Install a tool (mmry, trx, hstry, mailz)
 agntz tools update <tool>           # Update a tool
 agntz tools doctor                  # Check tool health
 ```
@@ -90,22 +94,6 @@ agntz schedule logs backup                                       # View history
 agntz schedule status                                            # Overview
 agntz schedule next                                              # Upcoming runs
 agntz schedule remove backup -y                                  # Delete
-```
-
-## Dependencies
-
-agntz wraps several external tools. Install them as needed:
-
-- **[mmry](https://github.com/byteowlz/mmry)** - Memory system for humans and AI agents
-- **[trx](https://github.com/byteowlz/trx)** - Minimal git-backed issue tracker
-- **[cass](https://github.com/Dicklesworthstone/coding_agent_session_search)** - Agent session history search
-- **[mailz](https://github.com/byteowlz/mailz)** - Agent coordination messaging
-- **[skdlr](https://github.com/byteowlz/skdlr)** - Cross-platform task scheduler
-
-Install all with:
-
-```bash
-agntz tools install all
 ```
 
 ## License
