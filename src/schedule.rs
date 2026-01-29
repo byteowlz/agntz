@@ -275,7 +275,18 @@ async fn handle_doctor() -> Result<()> {
 }
 
 fn run_skdlr(args: &[String]) -> Result<()> {
-    let output = Command::new("skdlr")
+    let skdlr_bin = std::env::var("AGNTZ_SCHEDULER_BIN").unwrap_or_else(|_| "skdlr".to_string());
+    let skdlr_config = std::env::var("AGNTZ_SCHEDULER_CONFIG")
+        .ok()
+        .or_else(|| std::env::var("SKDLR_CONFIG").ok());
+
+    let mut command = Command::new(skdlr_bin);
+
+    if let Some(config_path) = skdlr_config {
+        command.arg("--config").arg(config_path);
+    }
+
+    let output = command
         .args(args)
         .output()
         .context("failed to run skdlr - is skdlr installed?")?;
