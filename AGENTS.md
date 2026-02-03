@@ -44,9 +44,12 @@ agntz search "how did I fix..."        # Search agent session history (defaults 
 
 # Schedule
 agntz schedule list                    # List schedules
-agntz schedule add job -s "0 * * * *" -c "cmd"  # Add
+agntz schedule add job -s "0 * * * *" -c "cmd"  # Add schedule
+agntz schedule show job                # Show details
 agntz schedule run job                 # Trigger now
 agntz schedule logs job                # View history
+agntz schedule status                  # Show status overview
+agntz schedule next                    # Show upcoming runs
 
 # Tools
 agntz tools list
@@ -85,3 +88,20 @@ When working in a repo, use agntz for:
 3. **Coordination**: `agntz reserve` before editing shared files
 4. **Learning**: `agntz memory add` after discovering something useful
 5. **Session end**: `agntz release` files, `agntz memory export` if needed
+
+## Keeping Commands in Sync
+
+agntz wraps external CLI tools, so commands can drift as those tools evolve. To detect sync issues:
+
+```bash
+# Run the sync check script
+./scripts/check_sync.sh
+
+# Run integration tests
+./tests/integration/run_all.sh
+
+# Check tool health
+agntz tools doctor
+```
+
+If commands are out of sync, the wrapped tool may have changed flags or behavior. Run the tool directly with `--help` to see current options, then update the relevant Rust module in `src/`.

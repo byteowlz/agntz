@@ -1,0 +1,23 @@
+{
+  "todos": [
+    {
+      "id": "edb01777",
+      "content": "Review open PRs for agntz CLI",
+      "status": "completed",
+      "priority": "medium"
+    },
+    {
+      "id": "14f9731d",
+      "content": "Update README with new memory export examples",
+      "status": "completed",
+      "priority": "low"
+    },
+    {
+      "id": "11729cf9",
+      "content": "Run test suite before next release",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-01-29T13:35:29.474Z"
+}
