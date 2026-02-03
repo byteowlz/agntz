@@ -5,7 +5,6 @@
 agntz is a CLI toolkit for AI coding agents. It provides unified access to:
 
 - **Memory** - Store and retrieve context (wraps mmry)
-- **Coordination** - Agent-to-agent messaging and file reservations (wraps mailz)
 - **Tasks** - Task tracking (wraps trx)
 - **Search** - Agent session history search (wraps hstry)
 - **Schedule** - Task scheduling (wraps skdlr)
@@ -24,16 +23,6 @@ agntz memory list -c category          # Filter by category
 agntz memory export                    # Export to .memories/export.json
 agntz memory export --format md        # Export as markdown
 agntz memory import .memories/export.json
-
-# Mail / Coordination
-agntz mail inbox
-agntz mail send <recipient> "subject" --body "message"
-agntz mail ack <id>
-
-# File Reservations
-agntz reserve src/file.rs --reason "refactoring"
-agntz reservations
-agntz release src/file.rs
 
 # Tasks
 agntz tasks                            # List tasks (trx list)
@@ -74,7 +63,6 @@ agntz wraps these external tools (install via `agntz tools install`):
 | Tool | Purpose |
 |------|---------|
 | mmry | Memory storage and search |
-| mailz | Agent coordination, messaging, file reservations |
 | trx | Issue tracking |
 | hstry | Agent session history search |
 | skdlr | Task scheduling |
@@ -83,11 +71,10 @@ agntz wraps these external tools (install via `agntz tools install`):
 
 When working in a repo, use agntz for:
 
-1. **Session start**: `agntz mail inbox` to check messages, `agntz ready` for tasks
+1. **Session start**: `agntz ready` for tasks
 2. **Context**: `agntz memory search "topic"` to find relevant memories
-3. **Coordination**: `agntz reserve` before editing shared files
-4. **Learning**: `agntz memory add` after discovering something useful
-5. **Session end**: `agntz release` files, `agntz memory export` if needed
+3. **Learning**: `agntz memory add` after discovering something useful
+4. **Session end**: `agntz memory export` if needed
 
 ## Keeping Commands in Sync
 

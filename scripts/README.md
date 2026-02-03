@@ -14,7 +14,7 @@ Checks if agntz commands are in sync with the wrapped CLI tools.
 
 ### What it does
 
-- Compares command flags between agntz and skdlr, mmry, trx, mailz, hstry
+- Compares command flags between agntz and skdlr, mmry, trx, hstry
 - Detects new commands or flags that agntz doesn't expose
 - Reports flag naming mismatches (e.g., `--enabled` vs `--disabled`)
 - Suggests which source files need updating

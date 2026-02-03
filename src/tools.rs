@@ -9,7 +9,7 @@ pub enum ToolsCommand {
 
     /// Install a tool
     Install {
-        /// Tool name (mmry, mailz, trx, hstry, all)
+        /// Tool name (mmry, trx, hstry, all)
         tool: String,
     },
 
@@ -36,12 +36,6 @@ const TOOLS: &[ToolInfo] = &[
         description: "Memory storage and search",
         binary: "mmry",
         install_cmd: "cargo install mmry-cli",
-    },
-    ToolInfo {
-        name: "mailz",
-        description: "Agent coordination and messaging",
-        binary: "mailz-cli",
-        install_cmd: "cargo install mailz",
     },
     ToolInfo {
         name: "trx",

@@ -144,23 +144,6 @@ else
 fi
 echo ""
 
-echo "=== Checking mailz-cli (mail/reservations) ==="
-if command -v mailz-cli &> /dev/null; then
-    MAILZ_VERSION=$(mailz-cli --version 2>&1 | head -1)
-    echo "mailz-cli version: $MAILZ_VERSION"
-
-    echo "Checking mailz commands vs agntz commands..."
-    MAILZ_COMMANDS=$(mailz-cli --help 2>&1 | grep -A 30 "Commands:" | grep "^\s*[a-z]" | awk '{print $1}')
-    AGNTZ_MAIL_COMMANDS="inbox send ack"
-    AGNTZ_RESERVATION_COMMANDS="reserve release reservations"
-
-    report_ok "Basic mailz commands wrapped (check manually for new features)"
-
-else
-    echo "⊘ mailz-cli not installed - skipping"
-fi
-echo ""
-
 echo "=== Checking hstry (search) ==="
 if command -v hstry &> /dev/null; then
     HSTRY_VERSION=$(hstry --version 2>&1 | head -1)

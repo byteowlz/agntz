@@ -14,7 +14,6 @@ Run a specific tool's tests:
 ./tests/integration/test_skdlr.sh
 ./tests/integration/test_mmry.sh
 ./tests/integration/test_trx.sh
-./tests/integration/test_mailz.sh
 ./tests/integration/test_hstry.sh
 ```
 
@@ -38,7 +37,6 @@ Each test script checks:
 - **test_skdlr.sh**: Schedule commands (add, list, show, edit, run, logs, enable/disable)
 - **test_mmry.sh**: Memory commands (add, search, list, export, import, stats, stores)
 - **test_trx.sh**: Task/issue commands (create, list, show, update, close)
-- **test_mailz.sh**: Mail and reservation commands (inbox, reserve, release)
 - **test_hstry.sh**: Search commands (search with various flags)
 
 ## CI Integration
@@ -58,7 +56,7 @@ jobs:
           toolchain: stable
       - name: Install tools
         run: |
-          cargo install mmry-cli skdlr trx mailz hstry-cli
+          cargo install mmry-cli skdlr trx hstry-cli
       - name: Build agntz
         run: cargo build
       - name: Run sync check

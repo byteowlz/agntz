@@ -9,14 +9,13 @@
 
 ### 2. Integration Test Suite (`tests/integration/`)
 
-Created 5 test scripts that verify agntz correctly wraps each tool:
+Created 4 test scripts that verify agntz correctly wraps each tool:
 
 | Script | Tool | Tests |
 |--------|------|-------|
 | `test_skdlr.sh` | skdlr | add, list, show, edit, remove, enable/disable, run, logs, status, next, backend |
 | `test_mmry.sh` | mmry | add, search, list, export (json/md), import, stats, stores, remove |
 | `test_trx.sh` | trx | create, list, show, update, close, ready commands |
-| `test_mailz.sh` | mailz-cli | inbox, reserve, release, reservations |
 | `test_hstry.sh` | hstry | search with all flag combinations |
 
 **Runner script:** `run_all.sh` - executes all tests and reports summary
@@ -73,7 +72,6 @@ agntz/
         ├── test_skdlr.sh              # NEW: skdlr tests
         ├── test_mmry.sh               # NEW: mmry tests
         ├── test_trx.sh                # NEW: trx tests
-        ├── test_mailz.sh              # NEW: mailz tests
         └── test_hstry.sh              # NEW: hstry tests
 ```
 

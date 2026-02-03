@@ -2,7 +2,7 @@
 
 Agent utility toolkit for AI coding agents.
 
-A standalone CLI providing common agent operations like memory management, messaging, file reservations, and issue tracking. Designed to be used by AI agents across any project, not tied to any specific ecosystem.
+A standalone CLI providing common agent operations like memory management, issue tracking, and search. Designed to be used by AI agents across any project, not tied to any specific ecosystem.
 
 ## Installation
 
@@ -28,24 +28,6 @@ agntz memory export --format md                 # Export as markdown
 agntz memory import memories.json               # Import from file
 agntz memory stats                              # Show statistics
 agntz memory stores                             # List available stores
-```
-
-### Mail (wraps mailz)
-
-```bash
-agntz mail inbox                    # Check inbox
-agntz mail send <to> "subject"      # Send message
-agntz mail read <id>                # Read message
-agntz mail ack <id>                 # Acknowledge message
-agntz mail search "query"           # Search messages
-```
-
-### File Reservations
-
-```bash
-agntz reserve src/main.rs --reason "refactoring"   # Reserve file
-agntz reservations                                  # List active reservations
-agntz release src/main.rs                          # Release reservation
 ```
 
 ### Tasks (wraps trx)
@@ -75,7 +57,7 @@ agntz search "query" --all-workspaces
 
 ```bash
 agntz tools list                    # List available/installed tools
-agntz tools install <tool>          # Install a tool (mmry, trx, hstry, mailz)
+agntz tools install <tool>          # Install a tool (mmry, trx, hstry)
 agntz tools update <tool>           # Update a tool
 agntz tools doctor                  # Check tool health
 ```

@@ -5,13 +5,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 mod issues;
-mod mail;
 mod memory;
 mod schedule;
 mod tools;
 
 use issues::IssuesCommand;
-use mail::MailCommand;
 use memory::MemoryCommand;
 use schedule::ScheduleCommand;
 use tools::ToolsCommand;
@@ -31,36 +29,6 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
-    },
-
-    /// Mail and messaging
-    Mail {
-        #[command(subcommand)]
-        command: MailCommand,
-    },
-
-    /// File reservations
-    Reserve {
-        /// Files to reserve
-        files: Vec<PathBuf>,
-        /// Reason for reservation
-        #[arg(short, long)]
-        reason: Option<String>,
-        /// TTL in seconds
-        #[arg(long, default_value = "1800")]
-        ttl: u32,
-    },
-
-    /// List active reservations
-    Reservations,
-
-    /// Release file reservations
-    Release {
-        /// Files to release (or --all)
-        files: Vec<PathBuf>,
-        /// Release all reservations
-        #[arg(long)]
-        all: bool,
     },
 
     /// Task tracking
@@ -124,7 +92,7 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
-    /// Initialize agntz for current repo (mmry store, mailz, AGENTS.md)
+    /// Initialize agntz for current repo (mmry store, AGENTS.md)
     Init {
         /// Force re-initialization
         #[arg(long)]
@@ -138,10 +106,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Memory { command } => memory::handle(command).await,
-        Commands::Mail { command } => mail::handle(command).await,
-        Commands::Reserve { files, reason, ttl } => handle_reserve(files, reason, ttl).await,
-        Commands::Reservations => handle_reservations().await,
-        Commands::Release { files, all } => handle_release(files, all).await,
         Commands::Tasks { command } => issues::handle(command).await,
         Commands::Ready => handle_ready().await,
         Commands::Search {
@@ -175,42 +139,6 @@ async fn main() -> Result<()> {
         Commands::Completions { shell } => handle_completions(shell),
         Commands::Init { force } => handle_init(force).await,
     }
-}
-
-async fn handle_reserve(files: Vec<PathBuf>, reason: Option<String>, ttl: u32) -> Result<()> {
-    let mut args = vec!["reserve".to_string()];
-
-    for file in &files {
-        args.push(file.to_string_lossy().to_string());
-    }
-
-    args.push("--ttl".to_string());
-    args.push(ttl.to_string());
-
-    if let Some(reason) = reason {
-        args.push("--reason".to_string());
-        args.push(reason);
-    }
-
-    run_mailz_cli(&args)
-}
-
-async fn handle_reservations() -> Result<()> {
-    run_mailz_cli(&["reservations".to_string()])
-}
-
-async fn handle_release(files: Vec<PathBuf>, all: bool) -> Result<()> {
-    let mut args = vec!["release".to_string()];
-
-    if all {
-        args.push("--all".to_string());
-    } else {
-        for file in &files {
-            args.push(file.to_string_lossy().to_string());
-        }
-    }
-
-    run_mailz_cli(&args)
 }
 
 async fn handle_ready() -> Result<()> {
@@ -455,24 +383,6 @@ fn handle_completions(shell: clap_complete::Shell) -> Result<()> {
     Ok(())
 }
 
-fn run_mailz_cli(args: &[String]) -> Result<()> {
-    let output = Command::new("mailz-cli")
-        .args(args)
-        .output()
-        .context("failed to run mailz-cli - is mailz installed?")?;
-
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if !output.status.success() {
-        anyhow::bail!("mailz-cli failed");
-    }
-
-    Ok(())
-}
-
 /// Get the current repo name from git remote or directory name
 fn get_repo_name() -> Option<String> {
     let output = Command::new("git")
@@ -503,7 +413,7 @@ async fn handle_init(force: bool) -> Result<()> {
     println!("Initializing agntz for repo: {}", repo_name);
 
     // 1. Initialize mmry with repo-specific store
-    println!("\n[1/4] Initializing mmry store...");
+    println!("\n[1/3] Initializing mmry store...");
     let mut mmry_args = vec!["init", "--store", &repo_name];
     if force {
         mmry_args.push("--force");
@@ -520,26 +430,8 @@ async fn handle_init(force: bool) -> Result<()> {
         eprint!("{}", String::from_utf8_lossy(&mmry_output.stderr));
     }
 
-    // 2. Initialize mailz
-    println!("[2/4] Initializing mailz...");
-    let mut mailz_args = vec!["init"];
-    if force {
-        mailz_args.push("--force");
-    }
-    let mailz_output = Command::new("mailz-cli")
-        .args(&mailz_args)
-        .output()
-        .context("failed to run mailz-cli init - is mailz installed?")?;
-
-    if !mailz_output.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&mailz_output.stdout));
-    }
-    if !mailz_output.stderr.is_empty() && !mailz_output.status.success() {
-        eprint!("{}", String::from_utf8_lossy(&mailz_output.stderr));
-    }
-
-    // 3. Initialize trx
-    println!("[3/4] Initializing trx...");
+    // 2. Initialize trx
+    println!("[2/3] Initializing trx...");
     let trx_args = vec!["init", "--prefix", &repo_name];
     let trx_output = Command::new("trx")
         .args(&trx_args)
@@ -553,22 +445,19 @@ async fn handle_init(force: bool) -> Result<()> {
         eprint!("{}", String::from_utf8_lossy(&trx_output.stderr));
     }
 
-    // 4. Append to AGENTS.md
-    println!("[4/4] Updating AGENTS.md...");
+    // 3. Append to AGENTS.md
+    println!("[3/3] Updating AGENTS.md...");
     let agents_md = PathBuf::from("AGENTS.md");
     let agntz_section = format!(
         r#"
 ## agntz
 
-Use agntz for memory and coordination:
+Use agntz for memory:
 
 ```bash
 agntz memory search "topic"    # Find relevant context
 agntz memory add "insight" -c category
 agntz memory list
-agntz mail inbox               # Check messages
-agntz reserve <file>           # Before editing shared files
-agntz release <file>           # When done
 ```
 "#
     );
