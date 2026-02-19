@@ -6,8 +6,28 @@ A standalone CLI providing common agent operations like memory management, issue
 
 ## Installation
 
+### Package Managers
+
+#### Arch Linux (AUR)
 ```bash
-just install #if you have the just commandrunner installed
+paru -S agntz  # or yay/pacman
+```
+
+#### macOS/Linux (Homebrew)
+```bash
+brew install byteowlz/tap/agntz
+```
+
+#### Windows (Scoop)
+```bash
+scoop bucket add byteowlz https://github.com/byteowlz/scoop-bucket
+scoop install agntz
+```
+
+### From Source
+
+```bash
+just install  # if you have just installed
 ```
 
 or via cargo

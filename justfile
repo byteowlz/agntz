@@ -99,3 +99,40 @@ watch:
 # Update dependencies
 update:
     cargo update
+
+# === Release ===
+
+# Release: bump version, commit, tag, and push
+release-bump version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{version}}"
+    if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Error: Version must be in format X.Y.Z"
+        exit 1
+    fi
+    echo "Bumping version to $VERSION"
+    sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+    sed -i "s/version = \".*\"/version = \"$VERSION\"/" dist/homebrew/agntz.rb
+    sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" dist/scoop/agntz.json
+    sed -i "s/v0\.[0-9]\+\.[0-9]\+/v$VERSION/g" dist/scoop/agntz.json
+    git add Cargo.toml dist/homebrew/agntz.rb dist/scoop/agntz.json
+    git commit -m "chore: bump version to $VERSION"
+    git tag "v$VERSION"
+    git push origin main
+    git push origin "v$VERSION"
+    echo "Release v$VERSION pushed! Workflow will start automatically."
+
+# Check release readiness
+release-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Checking release readiness..."
+    cargo test --quiet
+    cargo clippy --quiet -- -D warnings
+    cargo fmt -- --check
+    echo "All checks passed!"
+
+# Create release using cargo-release
+release version_type:
+    cargo release {{version_type}}

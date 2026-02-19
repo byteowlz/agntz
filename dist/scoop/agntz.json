@@ -1,0 +1,30 @@
+{
+    "version": "0.3.0",
+    "description": "Agent utility toolkit for AI coding agents",
+    "homepage": "https://github.com/byteowlz/agntz",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/byteowlz/agntz/releases/download/v0.3.0/agntz-v0.3.0-x86_64-pc-windows-msvc.zip",
+            "hash": "PLACEHOLDER_HASH"
+        },
+        "arm64": {
+            "url": "https://github.com/byteowlz/agntz/releases/download/v0.3.0/agntz-v0.3.0-aarch64-pc-windows-msvc.zip",
+            "hash": "PLACEHOLDER_HASH"
+        }
+    },
+    "bin": [
+        "agntz.exe"
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/byteowlz/agntz/releases/download/v$version/agntz-v$version-x86_64-pc-windows-msvc.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/byteowlz/agntz/releases/download/v$version/agntz-v$version-aarch64-pc-windows-msvc.zip"
+            }
+        }
+    }
+}

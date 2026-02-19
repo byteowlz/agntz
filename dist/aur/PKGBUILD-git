@@ -1,0 +1,30 @@
+# Maintainer: byteowlz <https://github.com/byteowlz>
+pkgname=agntz-git
+pkgver=0.3.0
+pkgrel=1
+pkgdesc='Agent utility toolkit for AI coding agents (git version)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/byteowlz/agntz'
+license=('MIT')
+makedepends=('cargo' 'git')
+provides=('agntz')
+conflicts=('agntz')
+source=("git+https://github.com/byteowlz/agntz.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd agntz
+    git describe --long --tags --abbrev=7 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' || \
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+    cd agntz
+    export CARGO_TARGET_DIR=target
+    cargo build --release --locked
+}
+
+package() {
+    cd agntz
+    install -Dm755 target/release/agntz "$pkgdir/usr/bin/agntz"
+}
