@@ -376,6 +376,60 @@ fn get_repo_name() -> Option<String> {
         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
 }
 
+/// Agent identity detected from environment.
+struct AgentIdentity {
+    /// Harness name (e.g. "pi", "opencode")
+    harness: String,
+    /// Session ID or name if available
+    session: Option<String>,
+    /// Model string (e.g. "anthropic/claude-sonnet-4")
+    model: Option<String>,
+}
+
+/// Detect the agent harness from env vars set by the harness itself.
+///
+/// Pi's oqto-bridge extension sets:
+///   PI_HARNESS=pi
+///   PI_SESSION_ID=<uuid>
+///   PI_SESSION_FILE=<path>
+///   PI_MODEL=<provider>/<model>
+///   PI_CWD=<workdir>
+///
+/// Other harnesses can follow a similar pattern with their own prefix
+/// or a shared AGENT_HARNESS env var.
+fn detect_agent() -> Option<AgentIdentity> {
+    // Pi (via oqto-bridge extension)
+    if let Ok(harness) = std::env::var("PI_HARNESS") {
+        let session = std::env::var("PI_SESSION_ID").ok().filter(|s| !s.is_empty());
+        let model = std::env::var("PI_MODEL").ok().filter(|s| !s.is_empty());
+        return Some(AgentIdentity {
+            harness,
+            session,
+            model,
+        });
+    }
+
+    // opencode
+    if std::env::var("OPENCODE").is_ok() {
+        return Some(AgentIdentity {
+            harness: "opencode".to_string(),
+            session: None,
+            model: None,
+        });
+    }
+
+    // Generic fallback: AGENT_HARNESS env var
+    if let Ok(harness) = std::env::var("AGENT_HARNESS") {
+        return Some(AgentIdentity {
+            harness,
+            session: std::env::var("AGENT_SESSION_ID").ok(),
+            model: std::env::var("AGENT_MODEL").ok(),
+        });
+    }
+
+    None
+}
+
 fn run_mmry(args: &[String]) -> Result<()> {
     let mut full_args = Vec::new();
 
@@ -387,8 +441,34 @@ fn run_mmry(args: &[String]) -> Result<()> {
 
     full_args.extend(args.iter().cloned());
 
-    let output = Command::new("mmry")
-        .args(&full_args)
+    let mut cmd = Command::new("mmry");
+    cmd.args(&full_args);
+
+    // Auto-identify the agent for memory attribution via env vars.
+    // mmry reads MMRY_AGENT, MMRY_AGENT_KIND, and MMRY_AGENT_META.
+    if let Some(identity) = detect_agent() {
+        cmd.env("MMRY_AGENT", &identity.harness);
+        cmd.env("MMRY_AGENT_KIND", "coding_agent");
+
+        // Build metadata with repo, session, and model context
+        let mut meta = serde_json::Map::new();
+        if let Some(repo) = get_repo_name() {
+            meta.insert("repo".to_string(), serde_json::Value::String(repo));
+        }
+        if let Some(ref session) = identity.session {
+            meta.insert("session".to_string(), serde_json::Value::String(session.clone()));
+        }
+        if let Some(ref model) = identity.model {
+            meta.insert("model".to_string(), serde_json::Value::String(model.clone()));
+        }
+        if !meta.is_empty() {
+            if let Ok(meta_json) = serde_json::to_string(&meta) {
+                cmd.env("MMRY_AGENT_META", meta_json);
+            }
+        }
+    }
+
+    let output = cmd
         .output()
         .context("failed to run mmry - is mmry installed?")?;
 
