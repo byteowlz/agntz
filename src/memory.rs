@@ -386,52 +386,30 @@ struct AgentIdentity {
     model: Option<String>,
 }
 
-/// Detect the agent harness from env vars set by the harness itself.
+/// Detect the agent harness from env vars.
 ///
-/// Pi's oqto-bridge extension sets:
-///   PI_HARNESS=pi
-///   PI_SESSION_ID=<uuid>
-///   PI_SESSION_FILE=<path>
-///   PI_MODEL=<provider>/<model>
-///   PI_CWD=<workdir>
-///
-/// Other harnesses can follow a similar pattern with their own prefix
-/// or a shared AGENT_HARNESS env var.
+/// Any harness (pi, opencode, aider, etc.) can set:
+///   AGENT_HARNESS=<name>          (e.g. "pi", "opencode")
+///   AGENT_SESSION_ID=<uuid>
+///   AGENT_SESSION_NAME=<readable> (set after auto-rename)
+///   AGENT_SESSION_FILE=<path>
+///   AGENT_MODEL=<provider>/<id>
+///   AGENT_CWD=<workdir>
 fn detect_agent() -> Option<AgentIdentity> {
-    // Pi (via oqto-bridge extension)
-    if let Ok(harness) = std::env::var("PI_HARNESS") {
-        // Prefer session name (human-readable) over raw UUID
-        let session = std::env::var("PI_SESSION_NAME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("PI_SESSION_ID").ok().filter(|s| !s.is_empty()));
-        let model = std::env::var("PI_MODEL").ok().filter(|s| !s.is_empty());
-        return Some(AgentIdentity {
-            harness,
-            session,
-            model,
-        });
-    }
+    let harness = std::env::var("AGENT_HARNESS").ok().filter(|s| !s.is_empty())?;
 
-    // opencode
-    if std::env::var("OPENCODE").is_ok() {
-        return Some(AgentIdentity {
-            harness: "opencode".to_string(),
-            session: None,
-            model: None,
-        });
-    }
+    // Prefer session name (human-readable) over raw UUID
+    let session = std::env::var("AGENT_SESSION_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("AGENT_SESSION_ID").ok().filter(|s| !s.is_empty()));
+    let model = std::env::var("AGENT_MODEL").ok().filter(|s| !s.is_empty());
 
-    // Generic fallback: AGENT_HARNESS env var
-    if let Ok(harness) = std::env::var("AGENT_HARNESS") {
-        return Some(AgentIdentity {
-            harness,
-            session: std::env::var("AGENT_SESSION_ID").ok(),
-            model: std::env::var("AGENT_MODEL").ok(),
-        });
-    }
-
-    None
+    Some(AgentIdentity {
+        harness,
+        session,
+        model,
+    })
 }
 
 fn run_mmry(args: &[String]) -> Result<()> {
