@@ -400,7 +400,11 @@ struct AgentIdentity {
 fn detect_agent() -> Option<AgentIdentity> {
     // Pi (via oqto-bridge extension)
     if let Ok(harness) = std::env::var("PI_HARNESS") {
-        let session = std::env::var("PI_SESSION_ID").ok().filter(|s| !s.is_empty());
+        // Prefer session name (human-readable) over raw UUID
+        let session = std::env::var("PI_SESSION_NAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("PI_SESSION_ID").ok().filter(|s| !s.is_empty()));
         let model = std::env::var("PI_MODEL").ok().filter(|s| !s.is_empty());
         return Some(AgentIdentity {
             harness,
