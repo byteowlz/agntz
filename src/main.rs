@@ -4,8 +4,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod ctx;
+mod gvnr;
 mod issues;
+mod mcp;
 mod memory;
+mod readout;
 mod schedule;
 mod tools;
 
@@ -19,6 +23,10 @@ use tools::ToolsCommand;
 #[command(about = "Agent utility toolkit for AI coding agents")]
 #[command(version)]
 struct Cli {
+    /// Output machine-parseable JSON (unified agent surface)
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -69,9 +77,6 @@ enum Commands {
         /// Disable result deduplication
         #[arg(long)]
         no_dedup: bool,
-        /// Output raw JSON results
-        #[arg(long)]
-        json: bool,
     },
 
     /// Manage agent tools
@@ -85,6 +90,16 @@ enum Commands {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
+
+    /// Orient: operative-memory snapshot (who/where you are + what's relevant now)
+    Ctx {
+        /// Include the fleet view (gvnr resolve/list over the wire)
+        #[arg(long)]
+        gvnr: bool,
+    },
+
+    /// Run the ONE-tool MCP server (unified agent surface)
+    Mcp,
 
     /// Generate shell completions
     Completions {
@@ -105,9 +120,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Memory { command } => memory::handle(command).await,
-        Commands::Tasks { command } => issues::handle(command).await,
-        Commands::Ready => handle_ready().await,
+        Commands::Memory { command } => memory::handle(command, cli.json).await,
+        Commands::Tasks { command } => issues::handle(command, cli.json).await,
+        Commands::Ready => handle_ready(cli.json).await,
         Commands::Search {
             query,
             workspace,
@@ -118,7 +133,6 @@ async fn main() -> Result<()> {
             include_tools,
             include_system,
             no_dedup,
-            json,
         } => {
             handle_search(
                 query,
@@ -130,18 +144,35 @@ async fn main() -> Result<()> {
                 include_tools,
                 include_system,
                 no_dedup,
-                json,
+                cli.json,
             )
             .await
         }
         Commands::Tools { command } => tools::handle(command).await,
-        Commands::Schedule { command } => schedule::handle(command).await,
+        Commands::Schedule { command } => schedule::handle(command, cli.json).await,
+        Commands::Ctx { gvnr } => ctx::handle(gvnr, cli.json),
+        Commands::Mcp => {
+            let _ = mcp::run().await?;
+            Ok(())
+        }
         Commands::Completions { shell } => handle_completions(shell),
         Commands::Init { force } => handle_init(force).await,
     }
 }
 
-async fn handle_ready() -> Result<()> {
+async fn handle_ready(json: bool) -> Result<()> {
+    if json {
+        let (ok, out, err) =
+            readout::run("trx", &["ready".to_string(), "--json".to_string()]);
+        readout::emit(
+            "ready",
+            ok,
+            (!ok).then(|| format!("trx failed: {err}")),
+            readout::parse_or_text(out),
+        );
+        return Ok(());
+    }
+
     let output = Command::new("trx")
         .arg("ready")
         .output()
@@ -254,7 +285,7 @@ async fn handle_search(
 
     if json {
         let payload = serde_json::json!({ "hits": hits });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        readout::emit("search", true, None, payload);
         return Ok(());
     }
 

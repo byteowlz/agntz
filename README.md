@@ -38,6 +38,49 @@ cargo install --path .
 
 ## Commands
 
+### Orientation (`ctx`)
+
+`agntz ctx` is the operative-memory snapshot — who/where you are and what's
+relevant right now. It reads the `AGENT_CTX` v2 producer-map (multiplexer,
+harness, workspace, host), surfaces operative memory (open tasks, memories,
+recent history), and optionally the gvnr fleet view over the wire.
+
+```bash
+agntz ctx                       # Snapshot (text)
+agntz ctx --json                # Same, machine-parseable
+agntz ctx --gvnr                # Include optional fleet view (degrades if gvnr absent)
+```
+
+### MCP server (unified agent surface)
+
+`agntz mcp` runs a single-tool MCP server over stdio. The ONE tool,
+`agntz_orientation`, returns the same snapshot as `agntz ctx` — a unified
+agent surface instead of five help texts.
+
+```bash
+agntz mcp                       # JSON-RPC server on stdin/stdout
+```
+
+### Unified `--json` surface
+
+Every *read* command accepts a global `--json` flag and emits a stable
+envelope:
+
+```json
+{ "schema": "agntz.read", "version": 1, "verb": "tasks/list",
+  "ok": true, "error": null, "result": [...] }
+```
+
+`agntz ctx --json` emits `{ "schema": "agntz.ctx", ... }`. Writes keep
+their human output unless `--json` is given.
+
+```bash
+agntz tasks list --json
+agntz ready --json
+agntz schedule list --json
+agntz search "query" --json
+```
+
 ### Memory (wraps mmry)
 
 ```bash

@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Subcommand;
-use std::process::Command;
+
+use crate::readout;
 
 #[derive(Subcommand)]
 pub enum IssuesCommand {
@@ -57,25 +58,11 @@ pub enum IssuesCommand {
     },
 }
 
-pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
+pub async fn handle(command: Option<IssuesCommand>, json: bool) -> Result<()> {
     match command {
-        None => run_trx(&["list"]),
+        None => handle_list(None, None, json),
         Some(IssuesCommand::List { status, r#type }) => {
-            let mut args = vec!["list"];
-            let status_str;
-            let type_str;
-
-            if let Some(s) = &status {
-                status_str = s.clone();
-                args.push("--status");
-                args.push(&status_str);
-            }
-            if let Some(t) = &r#type {
-                type_str = t.clone();
-                args.push("--issue-type");
-                args.push(&type_str);
-            }
-            run_trx(&args)
+            handle_list(status.as_deref(), r#type.as_deref(), json)
         }
         Some(IssuesCommand::Create {
             title,
@@ -94,7 +81,7 @@ pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
                 args.push("-d");
                 args.push(&desc_str);
             }
-            run_trx(&args)
+            run_trx(&args, json, "tasks/create")
         }
         Some(IssuesCommand::Update {
             id,
@@ -115,7 +102,7 @@ pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
                 args.push("--priority");
                 args.push(&priority_str);
             }
-            run_trx(&args)
+            run_trx(&args, json, "tasks/update")
         }
         Some(IssuesCommand::Close { id, reason }) => {
             let mut args = vec!["close", &id];
@@ -126,26 +113,58 @@ pub async fn handle(command: Option<IssuesCommand>) -> Result<()> {
                 args.push("-r");
                 args.push(&reason_str);
             }
-            run_trx(&args)
+            run_trx(&args, json, "tasks/close")
         }
-        Some(IssuesCommand::Show { id }) => run_trx(&["show", &id]),
+        Some(IssuesCommand::Show { id }) => run_trx(&["show", &id], json, "tasks/show"),
     }
 }
 
-fn run_trx(args: &[&str]) -> Result<()> {
-    let output = Command::new("trx")
-        .args(args)
-        .output()
-        .context("failed to run trx - is trx installed?")?;
-
-    print!("{}", String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+fn handle_list(status: Option<&str>, issue_type: Option<&str>, json: bool) -> Result<()> {
+    let mut args = vec!["list".to_string(), "--json".to_string()];
+    if let Some(s) = status {
+        args.push("--status".to_string());
+        args.push(s.to_string());
+    }
+    if let Some(t) = issue_type {
+        args.push("--issue-type".to_string());
+        args.push(t.to_string());
     }
 
-    if !output.status.success() {
-        // Don't fail on non-zero exit for trx (it might just mean no results)
+    let (ok, out, err) = readout::run("trx", &args);
+    if json {
+        readout::emit(
+            "tasks/list",
+            ok,
+            (!ok).then(|| format!("trx failed: {err}")),
+            readout::parse_or_text(out),
+        );
+        return Ok(());
     }
-
+    print_plain(&out, &err);
     Ok(())
 }
+
+fn run_trx(args: &[&str], json: bool, verb: &str) -> Result<()> {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (ok, out, err) = readout::run("trx", &args);
+    if json {
+        readout::emit(
+            verb,
+            ok,
+            (!ok).then(|| format!("trx failed: {err}")),
+            readout::parse_or_text(out),
+        );
+        return Ok(());
+    }
+    print_plain(&out, &err);
+    Ok(())
+}
+
+fn print_plain(out: &str, err: &str) {
+    print!("{out}");
+    if !err.is_empty() {
+        eprint!("{err}");
+    }
+}
+
+// Keep the lane open for write verbs that want to look at the shape.

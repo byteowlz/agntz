@@ -5,6 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::readout;
+
 #[derive(Subcommand)]
 pub enum MemoryCommand {
     /// Add a memory
@@ -32,9 +34,6 @@ pub enum MemoryCommand {
         /// Maximum results
         #[arg(short, long, default_value = "10")]
         limit: usize,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 
     /// Export memories
@@ -70,9 +69,6 @@ pub enum MemoryCommand {
         /// Filter by category
         #[arg(short, long)]
         category: Option<String>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
         /// Include full embeddings in JSON output
         #[arg(long)]
         full: bool,
@@ -86,7 +82,7 @@ pub enum MemoryCommand {
     },
 }
 
-pub async fn handle(command: MemoryCommand) -> Result<()> {
+pub async fn handle(command: MemoryCommand, json: bool) -> Result<()> {
     match command {
         MemoryCommand::Add {
             content,
@@ -94,26 +90,20 @@ pub async fn handle(command: MemoryCommand) -> Result<()> {
             tags,
             importance,
         } => handle_add(content, category, tags, importance).await,
-        MemoryCommand::Search {
-            query,
-            mode,
-            limit,
-            json,
-        } => handle_search(query, mode, limit, json).await,
+        MemoryCommand::Search { query, mode, limit } => {
+            handle_search(query, mode, limit, json).await
+        }
         MemoryCommand::Export {
             output,
             format,
             all,
         } => handle_export(output, format, all).await,
         MemoryCommand::Import { file } => handle_import(file).await,
-        MemoryCommand::Stats => handle_stats().await,
-        MemoryCommand::Stores => handle_stores().await,
-        MemoryCommand::List {
-            limit,
-            category,
-            json,
-            full,
-        } => handle_list(limit, category, json, full).await,
+        MemoryCommand::Stats => handle_stats(json).await,
+        MemoryCommand::Stores => handle_stores(json).await,
+        MemoryCommand::List { limit, category, full } => {
+            handle_list(limit, category, json, full).await
+        }
         MemoryCommand::Remove { id } => handle_remove(id).await,
     }
 }
@@ -157,20 +147,21 @@ async fn handle_add(
 }
 
 async fn handle_search(query: String, mode: String, limit: usize, json: bool) -> Result<()> {
-    let mut args = vec![
+    let args = vec![
         "search".to_string(),
         query,
         "--mode".to_string(),
         mode,
         "--limit".to_string(),
         limit.to_string(),
+        "--json".to_string(),
     ];
 
     if json {
-        args.push("--json".to_string());
+        emit_mmry("memory/search", args).await
+    } else {
+        run_mmry(&args)
     }
-
-    run_mmry(&args)
 }
 
 async fn handle_export(output: Option<PathBuf>, format: String, all: bool) -> Result<()> {
@@ -285,13 +276,30 @@ async fn handle_import(file: PathBuf) -> Result<()> {
     run_mmry(&args)
 }
 
-async fn handle_stats() -> Result<()> {
-    run_mmry(&["stats".to_string()])
+async fn handle_stats(json: bool) -> Result<()> {
+    let args = vec!["stats".to_string(), "--json".to_string()];
+    if json {
+        emit_mmry("memory/stats", args).await
+    } else {
+        run_mmry(&["stats".to_string()])
+    }
 }
 
-async fn handle_stores() -> Result<()> {
+async fn handle_stores(json: bool) -> Result<()> {
     // Don't use auto-store for listing stores
-    run_mmry_raw(&["stores", "list"])
+    if json {
+        let args = vec!["stores".to_string(), "list".to_string(), "--json".to_string()];
+        let (ok, out, err) = readout::run("mmry", &args);
+        readout::emit(
+            "memory/stores",
+            ok,
+            (!ok).then(|| format!("mmry failed: {err}")),
+            readout::parse_or_text(out),
+        );
+        Ok(())
+    } else {
+        run_mmry_raw(&["stores", "list"])
+    }
 }
 
 async fn handle_list(
@@ -312,15 +320,29 @@ async fn handle_list(
         args.push(cat);
     }
 
-    if json {
-        args.push("--json".to_string());
-    }
-
     if full {
         args.push("--full".to_string());
     }
 
-    run_mmry(&args)
+    if json {
+        let mut jargs = args.clone();
+        jargs.push("--json".to_string());
+        emit_mmry("memory/list", jargs).await
+    } else {
+        run_mmry(&args)
+    }
+}
+
+/// Run mmry and emit the unified read envelope (used for --json reads).
+async fn emit_mmry(verb: &str, args: Vec<String>) -> Result<()> {
+    let (ok, out, err) = readout::run("mmry", &args);
+    readout::emit(
+        verb,
+        ok,
+        (!ok).then(|| format!("mmry failed: {err}")),
+        readout::parse_or_text(out),
+    );
+    Ok(())
 }
 
 async fn handle_remove(id: String) -> Result<()> {

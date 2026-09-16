@@ -14,8 +14,8 @@ fi
 # Build agntz
 echo "Building agntz..."
 cargo build --quiet 2>/dev/null || cargo build
-
-AGNTZ="./target/debug/agntz"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGNTZ="$SCRIPT_DIR/../../target/debug/agntz"
 
 # Setup test repo
 TEST_DIR=$(mktemp -d)
@@ -71,8 +71,8 @@ echo -n "Test 8: tasks list --status... "
 $AGNTZ tasks list --status "open" &> /dev/null && echo "✓" || echo "✗"
 
 # Test 9: List by type
-echo -n "Test 9: tasks list --issue-type... "
-$AGNTZ tasks list --issue-type "bug" &> /dev/null && echo "✓" || echo "✗"
+echo -n "Test 9: tasks list --type... "
+$AGNTZ tasks list --type "bug" &> /dev/null && echo "✓" || echo "✗"
 
 # Test 10: Create feature
 echo -n "Test 10: tasks create (feature)... "

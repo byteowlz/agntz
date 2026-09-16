@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use std::process::Command;
 
+use crate::readout;
+
 #[derive(Subcommand)]
 pub enum ScheduleCommand {
     /// Add a new scheduled task
@@ -108,7 +110,7 @@ pub enum ScheduleCommand {
     Doctor,
 }
 
-pub async fn handle(command: ScheduleCommand) -> Result<()> {
+pub async fn handle(command: ScheduleCommand, json: bool) -> Result<()> {
     match command {
         ScheduleCommand::Add {
             name,
@@ -118,8 +120,8 @@ pub async fn handle(command: ScheduleCommand) -> Result<()> {
             description,
             disabled,
         } => handle_add(name, schedule, command, workdir, description, disabled).await,
-        ScheduleCommand::List { status } => handle_list(status).await,
-        ScheduleCommand::Show { name } => handle_show(name).await,
+        ScheduleCommand::List { status } => handle_list(status, json).await,
+        ScheduleCommand::Show { name } => handle_show(name, json).await,
         ScheduleCommand::Edit {
             name,
             schedule,
@@ -131,11 +133,11 @@ pub async fn handle(command: ScheduleCommand) -> Result<()> {
         ScheduleCommand::Enable { name } => handle_enable(name).await,
         ScheduleCommand::Disable { name } => handle_disable(name).await,
         ScheduleCommand::Run { name, dry_run } => handle_run(name, dry_run).await,
-        ScheduleCommand::Logs { name, last } => handle_logs(name, last).await,
-        ScheduleCommand::Status => handle_status().await,
-        ScheduleCommand::Next => handle_next().await,
-        ScheduleCommand::Backend => handle_backend().await,
-        ScheduleCommand::Doctor => handle_doctor().await,
+        ScheduleCommand::Logs { name, last } => handle_logs(name, last, json).await,
+        ScheduleCommand::Status => handle_status(json).await,
+        ScheduleCommand::Next => handle_next(json).await,
+        ScheduleCommand::Backend => handle_backend(json).await,
+        ScheduleCommand::Doctor => handle_doctor(json).await,
     }
 }
 
@@ -174,19 +176,27 @@ async fn handle_add(
     run_skdlr(&args)
 }
 
-async fn handle_list(status: Option<String>) -> Result<()> {
-    let mut args = vec!["list".to_string()];
+async fn handle_list(status: Option<String>, json: bool) -> Result<()> {
+    let mut args = vec!["list".to_string(), "--json".to_string()];
 
     if let Some(s) = status {
         args.push("--status".to_string());
         args.push(s);
     }
 
-    run_skdlr(&args)
+    if json {
+        emit_skdlr("schedule/list", &args)
+    } else {
+        run_skdlr(&["list".to_string()])
+    }
 }
 
-async fn handle_show(name: String) -> Result<()> {
-    run_skdlr(&["show".to_string(), name])
+async fn handle_show(name: String, json: bool) -> Result<()> {
+    if json {
+        emit_skdlr("schedule/show", &["show".to_string(), name])
+    } else {
+        run_skdlr(&["show".to_string(), name])
+    }
 }
 
 async fn handle_edit(
@@ -249,29 +259,65 @@ async fn handle_run(name: String, dry_run: bool) -> Result<()> {
     run_skdlr(&args)
 }
 
-async fn handle_logs(name: String, last: usize) -> Result<()> {
-    run_skdlr(&[
-        "logs".to_string(),
-        name,
-        "--last".to_string(),
-        last.to_string(),
-    ])
+async fn handle_logs(name: String, last: usize, json: bool) -> Result<()> {
+    if json {
+        emit_skdlr(
+            "schedule/logs",
+            &["logs".to_string(), name, "--last".to_string(), last.to_string()],
+        )
+    } else {
+        run_skdlr(&[
+            "logs".to_string(),
+            name,
+            "--last".to_string(),
+            last.to_string(),
+        ])
+    }
 }
 
-async fn handle_status() -> Result<()> {
-    run_skdlr(&["status".to_string()])
+async fn handle_status(json: bool) -> Result<()> {
+    if json {
+        emit_skdlr("schedule/status", &["status".to_string()])
+    } else {
+        run_skdlr(&["status".to_string()])
+    }
 }
 
-async fn handle_next() -> Result<()> {
-    run_skdlr(&["next".to_string()])
+async fn handle_next(json: bool) -> Result<()> {
+    if json {
+        emit_skdlr("schedule/next", &["next".to_string()])
+    } else {
+        run_skdlr(&["next".to_string()])
+    }
 }
 
-async fn handle_backend() -> Result<()> {
-    run_skdlr(&["backend".to_string()])
+async fn handle_backend(json: bool) -> Result<()> {
+    if json {
+        emit_skdlr("schedule/backend", &["backend".to_string()])
+    } else {
+        run_skdlr(&["backend".to_string()])
+    }
 }
 
-async fn handle_doctor() -> Result<()> {
-    run_skdlr(&["doctor".to_string()])
+async fn handle_doctor(json: bool) -> Result<()> {
+    if json {
+        emit_skdlr("schedule/doctor", &["doctor".to_string()])
+    } else {
+        run_skdlr(&["doctor".to_string()])
+    }
+}
+
+/// Run skdlr and emit the unified read envelope (used for --json reads).
+fn emit_skdlr(verb: &str, args: &[String]) -> Result<()> {
+    let skdlr_bin = std::env::var("AGNTZ_SCHEDULER_BIN").unwrap_or_else(|_| "skdlr".to_string());
+    let (ok, out, err) = readout::run(&skdlr_bin, args);
+    readout::emit(
+        verb,
+        ok,
+        (!ok).then(|| format!("skdlr failed: {err}")),
+        readout::parse_or_text(out),
+    );
+    Ok(())
 }
 
 fn run_skdlr(args: &[String]) -> Result<()> {
