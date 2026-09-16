@@ -55,12 +55,34 @@ wrappers underneath as backends:
 
 ### 3. Explicit non-features
 
+- **No inter-agent live chat (`agntz ask`).** Redundant with herdr, which owns
+  agent-to-agent live communication. Rejected — see trx.
 - **Correlation is not a feature.** Relating a task id across memory/session/
   deployment is inherited from AGENT_CTX: every tool stamps its lineage
   (session/workspace/machine id), so a read filtered by current AGENT_CTX *is*
   the correlation. No bespoke graph in agntz.
 - **snapshot capture is an open design problem** (see below), not a shipped
   feature yet.
+
+## Oqto runner — scopes + sandboxes (the future that earns its keep)
+
+The lasting value of agntz comes from connecting it to the **oqto runner** and
+leveraging Oqto's scopes and sandboxes — not from replicating herdr:
+
+- **Workspace scoping.** `ctx` and every read/write bind to the Oqto
+  **Workspace scope** the running agent is established in, not ad-hoc repo
+  detection. In shared, multi-agent Workspaces this is the only correct
+  identity; AGENT_CTX carries `WORKSPACE_ID`. Oqto is the multiplayer surface
+  for shared Workspaces / Work dirs, so this is where "whose memory, which
+  work" is actually decided.
+- **Sandbox awareness.** Inside an Oqto sandbox, agntz honors granted
+  capabilities: reads restricted to scope, writes gated, and `tools doctor`
+  reports what the sandbox *allows* — exposing the bounding honestly instead of
+  pretending it is unrestricted.
+
+This is tracked as a follow-up (oqto runner integration); the core `ctx`
+orientation layer is built against AGENT_CTX today so the oqto hookup slots in
+without rework.
 
 ## Open questions
 
