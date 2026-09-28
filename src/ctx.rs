@@ -77,9 +77,8 @@ const BAG_MEMBERS: &[(&str, &[&str])] = &[
     ),
 ];
 
-fn get(var: &str) -> Option<String> {
-    std::env::var(var)
-        .ok()
+fn get_from(env: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<String> {
+    env(var)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -88,15 +87,21 @@ fn get(var: &str) -> Option<String> {
 ///
 /// Tolerant: works with any combination of bags (bare pi, herdr+pi, full, …).
 pub fn read_agent_ctx() -> AgentCtx {
+    read_agent_ctx_from(&|v| std::env::var(v).ok())
+}
+
+/// Build an [`AgentCtx`] from a supplied env getter (used by tests and any
+/// caller that holds a snapshot instead of the process env).
+fn read_agent_ctx_from(env: &dyn Fn(&str) -> Option<String>) -> AgentCtx {
     let mut ctx = AgentCtx {
-        version: get("AGENT_CTX_VERSION"),
+        version: get_from(env, "AGENT_CTX_VERSION"),
         ..AgentCtx::default()
     };
 
     for (bag, members) in BAG_MEMBERS {
         let mut map = BTreeMap::new();
         for m in *members {
-            if let Some(v) = get(&format!("AGENT_CTX_{m}")) {
+            if let Some(v) = get_from(env, &format!("AGENT_CTX_{m}")) {
                 map.insert((*m).to_string(), Some(v));
             }
         }
@@ -106,11 +111,11 @@ pub fn read_agent_ctx() -> AgentCtx {
     }
 
     ctx.lineage = Lineage {
-        platform_session_id: get("AGENT_CTX_PLATFORM_SESSION_ID"),
-        harness_session_id: get("AGENT_CTX_HARNESS_SESSION_ID"),
-        agent_id: get("AGENT_CTX_AGENT_ID"),
-        workspace_id: get("AGENT_CTX_WORKSPACE_ID"),
-        machine_id: get("AGENT_CTX_MACHINE_ID"),
+        platform_session_id: get_from(env, "AGENT_CTX_PLATFORM_SESSION_ID"),
+        harness_session_id: get_from(env, "AGENT_CTX_HARNESS_SESSION_ID"),
+        agent_id: get_from(env, "AGENT_CTX_AGENT_ID"),
+        workspace_id: get_from(env, "AGENT_CTX_WORKSPACE_ID"),
+        machine_id: get_from(env, "AGENT_CTX_MACHINE_ID"),
     };
 
     ctx
@@ -210,15 +215,19 @@ pub fn read_tasks(ctx: &AgentCtx) -> TaskSummary {
     .collect();
 
     out.available = true;
-    out.open = tasks.iter().filter(|t| t.status == "open").cloned().collect();
+    out.open = tasks
+        .iter()
+        .filter(|t| t.status == "open")
+        .cloned()
+        .collect();
     out.involving_self = out
         .open
         .iter()
         .filter(|t| {
             t.sessions.iter().any(|s| self_ids.contains(s))
-                || t.description.as_deref().is_some_and(|d| {
-                    self_ids.iter().any(|id| d.contains(id))
-                })
+                || t.description
+                    .as_deref()
+                    .is_some_and(|d| self_ids.iter().any(|id| d.contains(id)))
         })
         .count();
     out
@@ -243,10 +252,7 @@ pub struct Memory {
 /// Top memories for this repo (mmry list --json --limit N).
 pub fn read_memories(limit: usize) -> MemorySummary {
     let mut out = MemorySummary::default();
-    let resp = match run_json(
-        "mmry",
-        &["ls", "--json", "--limit", &limit.to_string()],
-    ) {
+    let resp = match run_json("mmry", &["ls", "--json", "--limit", &limit.to_string()]) {
         Some(v) => v,
         None => {
             out.available = false;
@@ -256,16 +262,15 @@ pub fn read_memories(limit: usize) -> MemorySummary {
     };
 
     // mmry returns either an array of items or an object.
-    let items: Vec<Memory> = if let Ok(arr) = serde_json::from_value::<Vec<Memory>>(resp.clone())
-    {
+    let items: Vec<Memory> = if let Ok(arr) = serde_json::from_value::<Vec<Memory>>(resp.clone()) {
         arr
     } else if let Some(obj) = resp.as_object() {
         // { items: [...] } or { memories: [...] }
         for key in ["items", "memories", "results", "data"] {
-            if let Some(v) = obj.get(key) {
-                if let Ok(arr) = serde_json::from_value::<Vec<Memory>>(v.clone()) {
-                    return finish_memories(arr, out);
-                }
+            if let Some(v) = obj.get(key)
+                && let Ok(arr) = serde_json::from_value::<Vec<Memory>>(v.clone())
+            {
+                return finish_memories(arr, out);
             }
         }
         match obj.get("content").and_then(|c| c.as_str()) {
@@ -439,9 +444,9 @@ fn workspace(ctx: &AgentCtx) -> Workspace {
         .unwrap_or_else(|_| ".".to_string());
     Workspace {
         id: ctx.lineage.workspace_id.clone(),
-        path: ctx.val("platform", "WORKSPACE_PATH").or_else(|| {
-            std::env::var("AGENT_CTX_WORKSPACE_PATH").ok()
-        }),
+        path: ctx
+            .val("platform", "WORKSPACE_PATH")
+            .or_else(|| std::env::var("AGENT_CTX_WORKSPACE_PATH").ok()),
         cwd,
         repo: repo_name(),
     }
@@ -524,8 +529,13 @@ fn print_text(s: &CtxSnapshot) {
         println!("  agent_id:   {a}");
     }
     if let Some(h) = s.agent.val("host", "MACHINE_ID") {
-        println!("  machine:    {h}{}",
-            s.agent.val("host", "OS_ARCH").map(|a| format!(" ({a})")).unwrap_or_default());
+        println!(
+            "  machine:    {h}{}",
+            s.agent
+                .val("host", "OS_ARCH")
+                .map(|a| format!(" ({a})"))
+                .unwrap_or_default()
+        );
     }
 
     // Workspace
@@ -569,10 +579,16 @@ fn print_text(s: &CtxSnapshot) {
             println!("    {}{}", cat, clip(content, 90));
         }
     } else {
-        println!("  memories: unavailable ({})", s.operative_memory.memories.error.as_deref().unwrap_or("?"));
+        println!(
+            "  memories: unavailable ({})",
+            s.operative_memory.memories.error.as_deref().unwrap_or("?")
+        );
     }
     if s.operative_memory.history.available {
-        println!("  history:  {} recent", s.operative_memory.history.recent.len());
+        println!(
+            "  history:  {} recent",
+            s.operative_memory.history.recent.len()
+        );
         for h in &s.operative_memory.history.recent {
             println!(
                 "    {:<36} {} - {}",
@@ -582,7 +598,10 @@ fn print_text(s: &CtxSnapshot) {
             );
         }
     } else {
-        println!("  history:  unavailable ({})", s.operative_memory.history.error.as_deref().unwrap_or("?"));
+        println!(
+            "  history:  unavailable ({})",
+            s.operative_memory.history.error.as_deref().unwrap_or("?")
+        );
     }
 
     // Fleet
@@ -590,16 +609,25 @@ fn print_text(s: &CtxSnapshot) {
         println!("\nfleet (gvnr):");
         if let Some(runners) = &s.fleet.runners {
             for r in runners {
-                println!("  {}  {}  last_beat={}", r.runner_id, r.mesh_ip, r.last_beat);
+                println!(
+                    "  {}  {}  last_beat={}",
+                    r.runner_id, r.mesh_ip, r.last_beat
+                );
             }
         }
     } else {
-        println!("\nfleet (gvnr): unavailable — {}", s.fleet.reason.as_deref().unwrap_or("not configured"));
+        println!(
+            "\nfleet (gvnr): unavailable — {}",
+            s.fleet.reason.as_deref().unwrap_or("not configured")
+        );
         println!("  (start/point agntz at gvnr; fleet view is optional)");
     }
 
     println!("\nopen problems:");
-    println!("  snapshot_capture: {} — {}", s.open_problems.snapshot_capture.status, s.open_problems.snapshot_capture.note);
+    println!(
+        "  snapshot_capture: {} — {}",
+        s.open_problems.snapshot_capture.status, s.open_problems.snapshot_capture.note
+    );
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -626,44 +654,28 @@ fn run_json(tool: &str, args: &[&str]) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::collections::HashMap;
 
-    // Tests mutate the process-global env, so serialize them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_env() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    fn clear_all() {
-        for (k, _) in std::env::vars() {
-            if k.starts_with("AGENT_CTX_") {
-                std::env::remove_var(k);
-            }
-        }
-    }
-
-    fn with_agent_ctx(vars: &[(&str, &str)]) {
-        clear_all();
-        for (k, v) in vars {
-            std::env::set_var(format!("AGENT_CTX_{}", k), *v);
-        }
+    /// Build an [`AgentCtx`] from an explicit AGENT_CTX_* map without touching
+    /// the process-global env.
+    fn make_ctx(vars: &[(&str, &str)]) -> AgentCtx {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (format!("AGENT_CTX_{k}"), v.to_string()))
+            .collect();
+        read_agent_ctx_from(&|var: &str| map.get(var).cloned())
     }
 
     #[test]
     fn tolerates_absent_bags() {
-        let _g = lock_env();
-        clear_all();
-        let ctx = read_agent_ctx();
+        let ctx = make_ctx(&[]);
         assert!(!ctx.is_enabled());
         assert!(ctx.bags.is_empty());
     }
 
     #[test]
     fn reads_floor_only() {
-        let _g = lock_env();
-        with_agent_ctx(&[("VERSION", "2"), ("HARNESS", "pi"), ("RUN_MODE", "local")]);
-        let ctx = read_agent_ctx();
+        let ctx = make_ctx(&[("VERSION", "2"), ("HARNESS", "pi"), ("RUN_MODE", "local")]);
         assert!(ctx.is_enabled());
         assert_eq!(ctx.bags["harness"]["HARNESS"].as_deref(), Some("pi"));
         assert!(!ctx.bags.contains_key("multiplexer"));
@@ -672,8 +684,7 @@ mod tests {
 
     #[test]
     fn reads_full_producer_map() {
-        let _g = lock_env();
-        with_agent_ctx(&[
+        let ctx = make_ctx(&[
             ("VERSION", "2"),
             ("HARNESS", "pi"),
             ("RUN_MODE", "runner"),
@@ -689,7 +700,6 @@ mod tests {
             ("MACHINE_ID", "node-1"),
             ("OS_ARCH", "linux/amd64"),
         ]);
-        let ctx = read_agent_ctx();
         assert!(ctx.bags.contains_key("platform"));
         assert!(ctx.bags.contains_key("multiplexer"));
         assert!(ctx.bags.contains_key("host"));
@@ -701,9 +711,10 @@ mod tests {
 
     #[test]
     fn reads_floor_only_remaining() {
-        let _g = lock_env();
-        with_agent_ctx(&[("VERSION", "2"), ("HARNESS", "pi"), ("RUN_MODE", "")]);
-        let ctx = read_agent_ctx();
-        assert_eq!(ctx.bags.get("harness").and_then(|m| m.get("RUN_MODE")), None);
+        let ctx = make_ctx(&[("VERSION", "2"), ("HARNESS", "pi"), ("RUN_MODE", "")]);
+        assert_eq!(
+            ctx.bags.get("harness").and_then(|m| m.get("RUN_MODE")),
+            None
+        );
     }
 }

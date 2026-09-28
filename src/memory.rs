@@ -101,9 +101,11 @@ pub async fn handle(command: MemoryCommand, json: bool) -> Result<()> {
         MemoryCommand::Import { file } => handle_import(file).await,
         MemoryCommand::Stats => handle_stats(json).await,
         MemoryCommand::Stores => handle_stores(json).await,
-        MemoryCommand::List { limit, category, full } => {
-            handle_list(limit, category, json, full).await
-        }
+        MemoryCommand::List {
+            limit,
+            category,
+            full,
+        } => handle_list(limit, category, json, full).await,
         MemoryCommand::Remove { id } => handle_remove(id).await,
     }
 }
@@ -187,7 +189,7 @@ async fn handle_export(output: Option<PathBuf>, format: String, all: bool) -> Re
     }
 }
 
-async fn export_json(output: &PathBuf, all: bool) -> Result<()> {
+async fn export_json(output: &std::path::Path, all: bool) -> Result<()> {
     let mut args = vec![
         "export".to_string(),
         "-o".to_string(),
@@ -288,7 +290,11 @@ async fn handle_stats(json: bool) -> Result<()> {
 async fn handle_stores(json: bool) -> Result<()> {
     // Don't use auto-store for listing stores
     if json {
-        let args = vec!["stores".to_string(), "list".to_string(), "--json".to_string()];
+        let args = vec![
+            "stores".to_string(),
+            "list".to_string(),
+            "--json".to_string(),
+        ];
         let (ok, out, err) = readout::run("mmry", &args);
         readout::emit(
             "memory/stores",
@@ -418,13 +424,19 @@ struct AgentIdentity {
 ///   AGENT_MODEL=<provider>/<id>
 ///   AGENT_CWD=<workdir>
 fn detect_agent() -> Option<AgentIdentity> {
-    let harness = std::env::var("AGENT_HARNESS").ok().filter(|s| !s.is_empty())?;
+    let harness = std::env::var("AGENT_HARNESS")
+        .ok()
+        .filter(|s| !s.is_empty())?;
 
     // Prefer session name (human-readable) over raw UUID
     let session = std::env::var("AGENT_SESSION_NAME")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("AGENT_SESSION_ID").ok().filter(|s| !s.is_empty()));
+        .or_else(|| {
+            std::env::var("AGENT_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
     let model = std::env::var("AGENT_MODEL").ok().filter(|s| !s.is_empty());
 
     Some(AgentIdentity {
@@ -460,15 +472,21 @@ fn run_mmry(args: &[String]) -> Result<()> {
             meta.insert("repo".to_string(), serde_json::Value::String(repo));
         }
         if let Some(ref session) = identity.session {
-            meta.insert("session".to_string(), serde_json::Value::String(session.clone()));
+            meta.insert(
+                "session".to_string(),
+                serde_json::Value::String(session.clone()),
+            );
         }
         if let Some(ref model) = identity.model {
-            meta.insert("model".to_string(), serde_json::Value::String(model.clone()));
+            meta.insert(
+                "model".to_string(),
+                serde_json::Value::String(model.clone()),
+            );
         }
-        if !meta.is_empty() {
-            if let Ok(meta_json) = serde_json::to_string(&meta) {
-                cmd.env("MMRY_AGENT_META", meta_json);
-            }
+        if !meta.is_empty()
+            && let Ok(meta_json) = serde_json::to_string(&meta)
+        {
+            cmd.env("MMRY_AGENT_META", meta_json);
         }
     }
 

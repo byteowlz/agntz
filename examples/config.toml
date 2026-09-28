@@ -1,0 +1,12 @@
+#:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/agntz/config.schema.json
+
+# Configuration for agntz.
+# Copy this file to $XDG_CONFIG_HOME/agntz/config.toml and adjust as needed.
+
+[board]
+default = ""
+repos = []
+
+[wiki]
+default = ""
+repos = []

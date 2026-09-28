@@ -1,0 +1,109 @@
+{
+  "$id": "https://github.com/byteowlz/agntz/schemas/config.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "agntz configuration",
+  "description": "Configuration schema for agntz",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema reference for editor support",
+      "type": "string"
+    },
+    "board": {
+      "description": "Named board repository configuration.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/BoardConfig"
+        }
+      ],
+      "default": {
+        "default": "",
+        "repos": []
+      }
+    },
+    "wiki": {
+      "description": "Named wiki repository configuration.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/WikiConfig"
+        }
+      ],
+      "default": {
+        "default": "",
+        "repos": []
+      }
+    }
+  },
+  "definitions": {
+    "BoardConfig": {
+      "description": "Named board repositories and the default selection.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Name of the default board repo.",
+          "type": "string",
+          "default": ""
+        },
+        "repos": {
+          "description": "Registered board repositories.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/RepoConfig"
+          }
+        }
+      }
+    },
+    "RepoConfig": {
+      "description": "A single registered board or wiki repository.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Unique name used to select this repo via `--name` or config.",
+          "type": "string",
+          "default": ""
+        },
+        "path": {
+          "description": "Absolute (or `~`/env-expanded) path to the local working tree.",
+          "type": "string",
+          "default": ""
+        },
+        "remote": {
+          "description": "Optional remote URL (may be empty for local-only repositories).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "role": {
+          "description": "Optional default role for board identity (board only).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "WikiConfig": {
+      "description": "Named wiki repositories and the default selection.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Name of the default wiki repo.",
+          "type": "string",
+          "default": ""
+        },
+        "repos": {
+          "description": "Registered wiki repositories.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/RepoConfig"
+          }
+        }
+      }
+    }
+  }
+}

@@ -9,130 +9,103 @@ set positional-arguments
 default:
     @just --list
 
-# === Build ===
-
-# Build debug binary
-build:
-    cargo build
-
-# Build release binary
-build-release:
-    cargo build --release
-
-# Fast compile check
-check:
-    cargo check
-
-# === Test ===
-
-# Run tests
-test:
-    cargo test
-
-# === Lint & Format ===
-
-# Run clippy linter
-clippy:
-    cargo clippy -- -D warnings
-
-# Alias for clippy
-lint: clippy
-
-# Auto-fix lint warnings
-fix:
-    cargo clippy --fix --allow-dirty
-
-# Format code
-fmt:
-    cargo fmt
-
-# Check formatting
-fmt-check:
-    cargo fmt -- --check
-
 # === Install ===
 
-# Install to ~/.cargo/bin
 install:
     cargo install --path . --force
 
-# Install to ~/.local/bin
 install-local:
     cargo build --release
     mkdir -p ~/.local/bin
     cp target/release/agntz ~/.local/bin/
     @echo "Installed agntz to ~/.local/bin/agntz"
 
-# Uninstall from ~/.cargo/bin
 uninstall:
     cargo uninstall agntz || true
 
-# Uninstall from ~/.local/bin
 uninstall-local:
     rm -f ~/.local/bin/agntz
     @echo "Removed agntz from ~/.local/bin"
 
-# === Docs ===
+# === Building ===
 
-# Generate documentation
-docs:
-    cargo doc --no-deps --open
+build:
+    cargo build
 
-# === Clean ===
+build-release:
+    cargo build --release
 
-# Clean build artifacts
+check:
+    cargo check
+
 clean:
     cargo clean
 
-# === Development ===
+# === Testing ===
 
-# Run in development mode
-run *args:
-    cargo run -- {{args}}
+test:
+    cargo test
 
-# Watch for changes and rebuild
-watch:
-    cargo watch -x check
+# Run integration tests against the wrapped CLIs (mmry/trx/etc.)
+integration:
+    ./tests/integration/run_all.sh
+
+# === Code Quality ===
+
+fmt:
+    cargo fmt
+
+fmt-check:
+    cargo fmt -- --check
+
+clippy:
+    cargo clippy --all-targets -- -D warnings
+
+lint: clippy
+
+fix:
+    cargo clippy --fix --allow-dirty
+
+# Run ast-grep guardrails if `sg` is available (optional)
+lint-rust-ai-guardrails:
+    @if command -v sg >/dev/null 2>&1; then \
+        echo "Running ast-grep guardrails..." && \
+        sg scan --config .ast-grep/sgconfig.yml; \
+    else \
+        echo "ast-grep (sg) not installed - skipping guardrail scan"; \
+    fi
+
+# Regenerate examples/config.toml + config.schema.json from the config structs
+generate-config:
+    cargo run --example generate_config
+
+# Run all checks (fmt + clippy + ast-grep + test + drift)
+check-all: fmt-check clippy lint-rust-ai-guardrails generate-config test
+    ./scripts/drift-check.sh
+
+# === Documentation ===
+
+docs:
+    cargo doc --no-deps --open
 
 # === Dependencies ===
 
-# Update dependencies
 update:
     cargo update
 
 # === Release ===
 
-# Release: bump version, commit, tag, and push
-release-bump version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    VERSION="{{version}}"
-    if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "Error: Version must be in format X.Y.Z"
-        exit 1
-    fi
-    echo "Bumping version to $VERSION"
-    sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-    sed -i "s/version = \".*\"/version = \"$VERSION\"/" dist/homebrew/agntz.rb
-    sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" dist/scoop/agntz.json
-    sed -i "s/v0\.[0-9]\+\.[0-9]\+/v$VERSION/g" dist/scoop/agntz.json
-    git add Cargo.toml dist/homebrew/agntz.rb dist/scoop/agntz.json
-    git commit -m "chore: bump version to $VERSION"
-    git tag "v$VERSION"
-    git push origin main
-    git push origin "v$VERSION"
-    echo "Release v$VERSION pushed! Workflow will start automatically."
+release version_type:
+    cargo release {{version_type}}
 
-# Check release readiness
 release-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Checking release readiness..."
     cargo test --quiet
-    cargo clippy --quiet -- -D warnings
+    cargo clippy --quiet --all-targets -- -D warnings
     cargo fmt -- --check
     echo "All checks passed!"
 
-# Create release using cargo-release
-release version_type:
-    cargo release {{version_type}}
+# === Shell Completions ===
+
+completions shell="bash":
+    @mkdir -p completions
+    cargo run --quiet -- completions {{shell}} > completions/agntz.{{shell}}

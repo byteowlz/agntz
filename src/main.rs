@@ -1,10 +1,12 @@
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+//! agntz — Agent utility toolkit for AI coding agents.
+//!
+//! One front door to an agent's operative memory, also seeing the fleet. Reads
+//! `AGENT_CTX` to orient, and delegates to the underlying stores (mmry, trx,
+//! hstry, skdlr) behind a stable unified `--json` surface.
 
+mod board;
 mod ctx;
+mod gitx;
 mod gvnr;
 mod issues;
 mod mcp;
@@ -12,117 +14,302 @@ mod memory;
 mod readout;
 mod schedule;
 mod tools;
+mod wiki;
 
+use std::env;
+use std::fs;
+use std::io::{self, IsTerminal};
+use std::path::PathBuf;
+use std::process::Command;
+
+use anyhow::{Context, Result};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use log::LevelFilter;
+
+use agntz::config::{AppConfig, AppPaths, load_or_init_config, write_default_config};
+
+use board::BoardCommand;
 use issues::IssuesCommand;
 use memory::MemoryCommand;
 use schedule::ScheduleCommand;
 use tools::ToolsCommand;
+use wiki::WikiCommand;
 
 #[derive(Parser)]
-#[command(name = "agntz")]
-#[command(about = "Agent utility toolkit for AI coding agents")]
-#[command(version)]
+#[command(
+    name = "agntz",
+    about = "Agent utility toolkit for AI coding agents",
+    version,
+    propagate_version = true
+)]
 struct Cli {
-    /// Output machine-parseable JSON (unified agent surface)
-    #[arg(long, global = true)]
-    json: bool,
-
+    #[command(flatten)]
+    common: CommonOpts,
     #[command(subcommand)]
     command: Commands,
 }
 
+/// Common global options shared across all subcommands.
+#[derive(Debug, Clone, Args)]
+pub struct CommonOpts {
+    /// Override the config file path.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub config: Option<PathBuf>,
+    /// Reduce output to only errors.
+    #[arg(short, long, action = clap::ArgAction::SetTrue, global = true)]
+    pub quiet: bool,
+    /// Increase logging verbosity (stackable).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+    /// Enable debug logging (equivalent to -vv).
+    #[arg(long, global = true)]
+    pub debug: bool,
+    /// Enable trace logging (overrides other levels).
+    #[arg(long, global = true)]
+    pub trace: bool,
+    /// Output machine-readable JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Disable ANSI colors in output.
+    #[arg(long = "no-color", global = true, conflicts_with = "color")]
+    pub no_color: bool,
+    /// Control color output (auto, always, never).
+    #[arg(long, value_enum, default_value_t = ColorOption::Auto, global = true)]
+    pub color: ColorOption,
+    /// Do not change anything on disk.
+    #[arg(long = "dry-run", global = true)]
+    pub dry_run: bool,
+    /// Assume "yes" for interactive prompts.
+    #[arg(short = 'y', long = "yes", global = true)]
+    pub assume_yes: bool,
+    /// Never prompt for input; fail if confirmation would be required.
+    #[arg(long = "no-input", global = true)]
+    pub no_input: bool,
+    /// Maximum seconds to allow an operation to run.
+    #[arg(long = "timeout", value_name = "SECONDS", global = true)]
+    pub timeout: Option<u64>,
+    /// Override the degree of parallelism.
+    #[arg(long = "parallel", value_name = "N", global = true)]
+    pub parallel: Option<usize>,
+    /// Disable progress indicators.
+    #[arg(long = "no-progress", global = true)]
+    pub no_progress: bool,
+    /// Emit additional diagnostics for troubleshooting.
+    #[arg(long = "diagnostics", global = true)]
+    pub diagnostics: bool,
+}
+
+/// Color output mode.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ColorOption {
+    /// Detect terminal capabilities automatically.
+    Auto,
+    /// Always emit ANSI color codes.
+    Always,
+    /// Never emit ANSI color codes.
+    Never,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Memory operations
+    /// Memory operations.
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
     },
 
-    /// Task tracking
+    /// Task tracking.
     #[command(alias = "issues")]
     Tasks {
         #[command(subcommand)]
         command: Option<IssuesCommand>,
     },
 
-    /// Show unblocked tasks
+    /// Show unblocked tasks.
     Ready,
 
-    /// Search agent session history
+    /// Search agent session history.
     Search {
-        /// Search query
+        /// Search query.
         query: String,
-        /// Limit to specific workspace path (defaults to current repo/dir)
+        /// Limit to a specific workspace path (defaults to current repo/dir).
         #[arg(short, long, alias = "repo")]
         workspace: Option<String>,
-        /// Limit to last N days
+        /// Limit to the last N days.
         #[arg(long)]
         days: Option<u32>,
-        /// Limit to a specific session/conversation ID
+        /// Limit to a specific session/conversation ID.
         #[arg(long)]
         session: Option<String>,
-        /// Maximum results to return
+        /// Maximum results to return.
         #[arg(short, long, default_value = "20")]
         limit: usize,
-        /// Search all workspaces (disables default workspace filter)
+        /// Search all workspaces (disables the default workspace filter).
         #[arg(long)]
         all_workspaces: bool,
-        /// Include tool calls/results
+        /// Include tool calls/results.
         #[arg(long)]
         include_tools: bool,
-        /// Include system context (AGENTS.md, etc.)
+        /// Include system context (AGENTS.md, etc.).
         #[arg(long)]
         include_system: bool,
-        /// Disable result deduplication
+        /// Disable result deduplication.
         #[arg(long)]
         no_dedup: bool,
     },
 
-    /// Manage agent tools
+    /// Manage agent tools.
     Tools {
         #[command(subcommand)]
         command: ToolsCommand,
     },
 
-    /// Task scheduling
+    /// Task scheduling.
     Schedule {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
 
-    /// Orient: operative-memory snapshot (who/where you are + what's relevant now)
+    /// Orient: operative-memory snapshot (who/where you are + what's relevant now).
     Ctx {
-        /// Include the fleet view (gvnr resolve/list over the wire)
+        /// Include the fleet view (gvnr resolve/list over the wire).
         #[arg(long)]
         gvnr: bool,
     },
 
-    /// Run the ONE-tool MCP server (unified agent surface)
+    /// Run the ONE-tool MCP server (unified agent surface).
     Mcp,
 
-    /// Generate shell completions
+    /// Generate shell completions.
     Completions {
-        /// Shell to generate completions for
+        /// Shell to generate completions for.
         shell: clap_complete::Shell,
     },
 
-    /// Initialize agntz for current repo (mmry store, AGENTS.md)
+    /// Initialize agntz for the current repo (mmry store, AGENTS.md).
     Init {
-        /// Force re-initialization
+        /// Force re-initialization.
         #[arg(long)]
         force: bool,
     },
+
+    /// Git-backed agent messageboard (coordination).
+    Board {
+        #[command(subcommand)]
+        command: BoardCommand,
+    },
+
+    /// Git-backed Markdown knowledge wiki (durable synthesis).
+    Wiki {
+        #[command(subcommand)]
+        command: WikiCommand,
+    },
+
+    /// Inspect and manage the agntz configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+/// Configuration subcommands.
+#[derive(Debug, Clone, Copy, Subcommand)]
+enum ConfigCommand {
+    /// Output the effective configuration.
+    Show,
+    /// Print the resolved config file path.
+    Path,
+    /// Print all resolved paths (config, data, state).
+    Paths,
+    /// Regenerate the default configuration file.
+    Reset,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeContext {
+    common: CommonOpts,
+    paths: AppPaths,
+    config: AppConfig,
+}
+
+impl RuntimeContext {
+    fn new(common: CommonOpts) -> Result<Self> {
+        let paths = AppPaths::discover(common.config.as_deref())?;
+        let config = load_or_init_config(&paths.config_file, common.dry_run)?;
+        let ctx = Self {
+            common,
+            paths,
+            config,
+        };
+        ctx.init_logging()?;
+        Ok(ctx)
+    }
+
+    fn init_logging(&self) -> Result<()> {
+        if self.common.quiet {
+            log::set_max_level(LevelFilter::Off);
+            return Ok(());
+        }
+
+        let mut builder =
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"));
+
+        builder.filter_level(self.effective_log_level());
+
+        let force_color = matches!(self.common.color, ColorOption::Always)
+            || env::var_os("FORCE_COLOR").is_some();
+        let disable_color = self.common.no_color
+            || matches!(self.common.color, ColorOption::Never)
+            || env::var_os("NO_COLOR").is_some()
+            || (!force_color && !io::stderr().is_terminal());
+
+        if disable_color {
+            builder.write_style(env_logger::fmt::WriteStyle::Never);
+        } else if force_color {
+            builder.write_style(env_logger::fmt::WriteStyle::Always);
+        } else {
+            builder.write_style(env_logger::fmt::WriteStyle::Auto);
+        }
+
+        if self.common.diagnostics {
+            builder.format_timestamp_millis();
+            builder.format_module_path(true);
+            builder.format_target(true);
+        }
+
+        // A prior caller (e.g. tests) may already have initialized the logger.
+        let _ = builder.try_init();
+        Ok(())
+    }
+
+    const fn effective_log_level(&self) -> LevelFilter {
+        if self.common.trace {
+            LevelFilter::Trace
+        } else if self.common.debug {
+            LevelFilter::Debug
+        } else {
+            match self.common.verbose {
+                0 => LevelFilter::Info,
+                1 => LevelFilter::Debug,
+                _ => LevelFilter::Trace,
+            }
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    try_main().await
+}
+
+async fn try_main() -> Result<()> {
     let cli = Cli::parse();
+    let ctx = RuntimeContext::new(cli.common.clone())?;
 
     match cli.command {
-        Commands::Memory { command } => memory::handle(command, cli.json).await,
-        Commands::Tasks { command } => issues::handle(command, cli.json).await,
-        Commands::Ready => handle_ready(cli.json).await,
+        Commands::Memory { command } => memory::handle(command, ctx.common.json).await,
+        Commands::Tasks { command } => issues::handle(command, ctx.common.json).await,
+        Commands::Ready => handle_ready(&ctx).await,
         Commands::Search {
             query,
             workspace,
@@ -144,26 +331,30 @@ async fn main() -> Result<()> {
                 include_tools,
                 include_system,
                 no_dedup,
-                cli.json,
+                &ctx,
             )
             .await
         }
         Commands::Tools { command } => tools::handle(command).await,
-        Commands::Schedule { command } => schedule::handle(command, cli.json).await,
-        Commands::Ctx { gvnr } => ctx::handle(gvnr, cli.json),
+        Commands::Schedule { command } => {
+            schedule::handle(command, ctx.common.json, ctx.common.assume_yes).await
+        }
+        Commands::Ctx { gvnr } => ctx::handle(gvnr, ctx.common.json),
         Commands::Mcp => {
-            let _ = mcp::run().await?;
+            mcp::run().await?;
             Ok(())
         }
         Commands::Completions { shell } => handle_completions(shell),
-        Commands::Init { force } => handle_init(force).await,
+        Commands::Init { force } => handle_init(force, &ctx).await,
+        Commands::Board { command } => board::handle(command, &ctx),
+        Commands::Wiki { command } => wiki::handle(command, &ctx),
+        Commands::Config { command } => handle_config(&ctx, command),
     }
 }
 
-async fn handle_ready(json: bool) -> Result<()> {
-    if json {
-        let (ok, out, err) =
-            readout::run("trx", &["ready".to_string(), "--json".to_string()]);
+async fn handle_ready(ctx: &RuntimeContext) -> Result<()> {
+    if ctx.common.json {
+        let (ok, out, err) = readout::run("trx", &["ready".to_string(), "--json".to_string()]);
         readout::emit(
             "ready",
             ok,
@@ -224,7 +415,7 @@ async fn handle_search(
     include_tools: bool,
     include_system: bool,
     no_dedup: bool,
-    json: bool,
+    ctx: &RuntimeContext,
 ) -> Result<()> {
     let mut args = vec!["search".to_string(), query.clone(), "--json".to_string()];
 
@@ -283,7 +474,7 @@ async fn handle_search(
     hits = filter_hits(hits, session.as_deref(), days);
     hits.truncate(limit);
 
-    if json {
+    if ctx.common.json {
         let payload = serde_json::json!({ "hits": hits });
         readout::emit("search", true, None, payload);
         return Ok(());
@@ -369,7 +560,7 @@ fn print_compact_hits(hits: &[HstrySearchHit]) {
         let workspace = hit
             .workspace
             .as_deref()
-            .and_then(|w| w.split('/').last())
+            .and_then(|w| w.rsplit('/').next())
             .unwrap_or("-");
 
         println!(
@@ -405,16 +596,63 @@ fn compact_label(value: &str, max_len: usize) -> String {
 }
 
 fn handle_completions(shell: clap_complete::Shell) -> Result<()> {
-    use clap::CommandFactory;
-    use clap_complete::generate;
-    use std::io;
-
     let mut cmd = Cli::command();
-    generate(shell, &mut cmd, "agntz", &mut io::stdout());
+    clap_complete::generate(shell, &mut cmd, "agntz", &mut io::stdout());
     Ok(())
 }
 
-/// Get the current repo name from git remote or directory name
+fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Show => {
+            if ctx.common.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&ctx.config)
+                        .context("serializing config to JSON")?
+                );
+            } else {
+                println!("{:#?}", ctx.config);
+            }
+            Ok(())
+        }
+        ConfigCommand::Path => {
+            println!("{}", ctx.paths.config_file.display());
+            Ok(())
+        }
+        ConfigCommand::Paths => {
+            let data = ctx.paths.data_dir.display();
+            let state = ctx.paths.state_dir.display();
+            if ctx.common.json {
+                let paths = serde_json::json!({
+                    "config": ctx.paths.config_file,
+                    "data": ctx.paths.data_dir,
+                    "state": ctx.paths.state_dir,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&paths).context("serializing paths to JSON")?
+                );
+            } else {
+                println!("config: {}", ctx.paths.config_file.display());
+                println!("data:   {}", data);
+                println!("state:  {}", state);
+            }
+            Ok(())
+        }
+        ConfigCommand::Reset => {
+            if ctx.common.dry_run {
+                log::info!(
+                    "dry-run: would reset config at {}",
+                    ctx.paths.config_file.display()
+                );
+                return Ok(());
+            }
+            write_default_config(&ctx.paths.config_file)
+        }
+    }
+}
+
+/// Get the current repo name from git remote or directory name.
 fn get_repo_name() -> Option<String> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
@@ -428,7 +666,7 @@ fn get_repo_name() -> Option<String> {
             .trim_end_matches(".git")
             .rsplit('/')
             .next()
-            .map(|s| s.to_string());
+            .map(str::to_string);
         if name.is_some() {
             return name;
         }
@@ -439,15 +677,14 @@ fn get_repo_name() -> Option<String> {
         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
 }
 
-async fn handle_init(force: bool) -> Result<()> {
+async fn handle_init(force: bool, ctx: &RuntimeContext) -> Result<()> {
     let repo_name = get_repo_name().context("could not determine repo name")?;
-    println!("Initializing agntz for repo: {}", repo_name);
+    println!("Initializing agntz for repo: {repo_name}");
 
-    // 1. Initialize mmry with repo-specific store
     println!("\n[1/3] Initializing mmry store...");
-    let mut mmry_args = vec!["init", "--store", &repo_name];
+    let mut mmry_args = vec!["init".to_string(), "--store".to_string(), repo_name.clone()];
     if force {
-        mmry_args.push("--force");
+        mmry_args.push("--force".to_string());
     }
     let mmry_output = Command::new("mmry")
         .args(&mmry_args)
@@ -461,9 +698,12 @@ async fn handle_init(force: bool) -> Result<()> {
         eprint!("{}", String::from_utf8_lossy(&mmry_output.stderr));
     }
 
-    // 2. Initialize trx
     println!("[2/3] Initializing trx...");
-    let trx_args = vec!["init", "--prefix", &repo_name];
+    let trx_args = vec![
+        "init".to_string(),
+        "--prefix".to_string(),
+        repo_name.clone(),
+    ];
     let trx_output = Command::new("trx")
         .args(&trx_args)
         .output()
@@ -476,11 +716,9 @@ async fn handle_init(force: bool) -> Result<()> {
         eprint!("{}", String::from_utf8_lossy(&trx_output.stderr));
     }
 
-    // 3. Append to AGENTS.md
     println!("[3/3] Updating AGENTS.md...");
     let agents_md = PathBuf::from("AGENTS.md");
-    let agntz_section = format!(
-        r#"
+    let agntz_section = r#"
 ## agntz
 
 Use agntz for memory:
@@ -491,13 +729,12 @@ agntz memory add "insight" -c category
 agntz memory list
 ```
 "#
-    );
+    .to_string();
 
     if agents_md.exists() {
         let content = fs::read_to_string(&agents_md)?;
         if content.contains("## agntz") {
             if force {
-                // Remove existing section and re-add
                 let new_content = remove_agntz_section(&content);
                 fs::write(
                     &agents_md,
@@ -515,14 +752,12 @@ agntz memory list
             println!("  Appended agntz section to AGENTS.md");
         }
     } else {
-        fs::write(
-            &agents_md,
-            format!("# Agent Instructions\n{}", agntz_section),
-        )?;
+        fs::write(&agents_md, format!("# Agent Instructions\n{agntz_section}"))?;
         println!("  Created AGENTS.md with agntz section");
     }
 
-    println!("\nDone! agntz initialized for '{}'", repo_name);
+    println!("\nDone! agntz initialized for '{repo_name}'");
+    let _ = ctx.common.dry_run;
     Ok(())
 }
 

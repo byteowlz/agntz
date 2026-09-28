@@ -1,0 +1,6 @@
+id: no-unwrap
+language: Rust
+rule:
+  pattern: $METHOD.unwrap()
+message: Avoid unwrap(); propagate errors with `?` and anyhow::Context.
+severity: warning

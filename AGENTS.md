@@ -1,94 +1,92 @@
-# agntz - Agent Utility Toolkit
+# AGENTS.md
 
-## Overview
+Guidance for coding agents working on agntz. Kept short: it carries enforceable
+boundaries and workflows and points at machine-checked configuration instead of
+duplicating any inventory.
 
-agntz is a CLI toolkit for AI coding agents. It provides unified access to:
+## Source of truth
 
-- **Memory** - Store and retrieve context (wraps mmry)
-- **Tasks** - Task tracking (wraps trx)
-- **Search** - Agent session history search (wraps hstry)
-- **Schedule** - Task scheduling (wraps skdlr)
-- **Tools** - Install and manage agent tools
+Static facts are machine-checked, not copied here:
 
-agntz is designed to be used by AI agents in coding environments like octo, Claude Code, Cursor, etc.
+- Crate/dependency/lint settings → `Cargo.toml`; authoritative enumeration is
+  `cargo metadata --no-deps --format-version 1`.
+- Task commands → `just` (run `just` to list).
+- Issues → `trx` (see below).
+- Drift guard → `scripts/drift-check.sh` (verifies required commands, the
+  JSON/TOML-only constraint, the `config` crate feature set, that `cargo
+  metadata` resolves, and that `examples/config.toml` + `config.schema.json`
+  match the config structs). Run it after touching the manifest, config structs,
+  or any doc claim.
 
-## Commands
+If `cargo metadata`, `just`, or `scripts/drift-check.sh` disagree with anything
+here, the command is right and this file is wrong.
 
-```bash
-# Memory
-agntz memory add "learned something important" -c category
-agntz memory search "query"
-agntz memory list                      # List all memories
-agntz memory list -c category          # Filter by category
-agntz memory export                    # Export to .memories/export.json
-agntz memory export --format md        # Export as markdown
-agntz memory import .memories/export.json
+## Domain and architecture
 
-# Tasks
-agntz tasks                            # List tasks (trx list)
-agntz ready                            # Show unblocked tasks (trx ready)
+- Read `CONTEXT.md` before domain work; keep it a glossary only.
+- Read `docs/adr/` before architectural changes; add an ADR only for
+  hard-to-reverse decisions with a real trade-off.
+- agntz is a loading layer: memory→mmry, tasks→trx, search→hstry,
+  schedule→skdlr, plus the board and wiki (self-contained Git-backed modules)
+  and `ctx` (orientation). Keep backend delegation thin.
+- Board is coordination, wiki is durable synthesis, trx is implementation
+  status, mmry is recall. Do not blur those boundaries.
+- Never bundle unrelated existing working-tree changes into a feature commit.
 
-# History Search
-agntz search "how did I fix..."        # Search agent session history (defaults to current workspace)
+## Strict lints
 
-# Schedule
-agntz schedule list                    # List schedules
-agntz schedule add job -s "0 * * * *" -c "cmd"  # Add schedule
-agntz schedule show job                # Show details
-agntz schedule run job                 # Trigger now
-agntz schedule logs job                # View history
-agntz schedule status                  # Show status overview
-agntz schedule next                    # Show upcoming runs
+`[lints.rust]` and `[lints.clippy]` are strict: `unsafe_code = "deny"`,
+`panic`/`dbg_macro`/`todo`/`unimplemented`/`exit`/`mem_forget` = deny, and the
+`all`/`cargo` clippy groups at deny. `unwrap_used`/`expect_used` and the
+`pedantic`/`nursery` style groups are relaxed (see the comments in `Cargo.toml`)
+so the large pre-existing modules and tests build without ad-hoc rewrites.
+Propagate errors with `?`, `anyhow::Result`, `.context("...")`. Commands must
+be safe against reuse: never stash/reset/discard another session's work, never
+force-push, never overwrite an existing message/page implicitly.
 
-# Tools
-agntz tools list
-agntz tools install mmry
-agntz tools doctor
-```
+## Workflow
 
-## Export Behavior
+- CLI: subcommands for verbs. Global flags `-q`, `-v`, `--debug`, `--trace`,
+  `--json`, `--no-color`, `--dry-run`, `--yes`, `--no-input`, `--timeout`,
+  `--no-progress`, `--diagnostics`.
+- Config structs: after editing `src/config.rs`, run `just generate-config` and
+  `just test` (the lib tests enforce the examples match).
+- Before anything significant: `just check-all`.
 
-`agntz memory export` exports memories from the store linked to the current repo:
+## Application formats: JSON and TOML only
 
-- Default output: `.memories/export.json`
-- Creates `.memories/` directory if it doesn't exist
-- Formats: `json` (default), `md` (markdown)
+- Machine output and config are **JSON or TOML only** — `--json` plus TOML
+  config files. Never add a YAML output mode, a YAML example, or a YAML crate.
+- The `config` crate runs with `default-features = false` and only
+  `json`/`toml` features. `scripts/drift-check.sh` enforces the absence of
+  `serde_yaml`.
 
-The `.memories/` directory should be gitignored for private memories or committed for shared context.
+## Configuration & storage
 
-## Dependencies
+- XDG paths with sensible fallbacks; expand `~` and env vars; a commented
+  example lives under `examples/`; a default config is written on first run.
+  Named board/wiki repos are selected via `flag > env (AGNTZ_BOARD/AGNTZ_WIKI)
+  > config default > first`.
 
-agntz wraps these external tools (install via `agntz tools install`):
+## Issue tracking (trx)
 
-| Tool | Purpose |
-|------|---------|
-| mmry | Memory storage and search |
-| trx | Issue tracking |
-| hstry | Agent session history search |
-| skdlr | Task scheduling |
-
-## For AI Agents
-
-When working in a repo, use agntz for:
-
-1. **Session start**: `agntz ready` for tasks
-2. **Context**: `agntz memory search "topic"` to find relevant memories
-3. **Learning**: `agntz memory add` after discovering something useful
-4. **Session end**: `agntz memory export` if needed
-
-## Keeping Commands in Sync
-
-agntz wraps external CLI tools, so commands can drift as those tools evolve. To detect sync issues:
+Use `trx` for all issue tracking — never markdown TODOs or `.beads`.
 
 ```bash
-# Run the sync check script
-./scripts/check_sync.sh
-
-# Run integration tests
-./tests/integration/run_all.sh
-
-# Check tool health
-agntz tools doctor
+trx ready --json                                   # find unblocked work
+trx create "Title" -t task -p 2 --json             # create (bug/feature/task/epic/chore)
+trx update <id> --status in_progress --json        # claim
+trx close <id> -r "reason" --json                  # complete with reason
 ```
 
-If commands are out of sync, the wrapped tool may have changed flags or behavior. Run the tool directly with `--help` to see current options, then update the relevant Rust module in `src/`.
+Priorities: 0=critical, 1=high, 2=medium (default), 3=low, 4=backlog.
+Issue state lives in `.trx/` (JSONL) — commit it with code changes.
+
+## House rules
+
+- Do exactly what the user asks — no unsolicited files.
+- Keep README updates concise and emoji-free.
+- Never commit secrets or sensitive paths; scrub logs.
+- `Cargo.lock` is committed; bump manifest + lock together.
+- Reference canonical agent skills in `~/byteowlz/skillissues` rather than
+  creating unmanaged skill copies.

@@ -38,6 +38,10 @@ cargo install --path .
 
 ## Commands
 
+All subcommands share global flags: `-q/--quiet`, `-v/--verbose`, `--debug`,
+`--trace`, `--json`, `--no-color`, `--color`, `--dry-run`, `--yes`,
+`--no-input`, `--timeout`, `--no-progress`, `--diagnostics`, `--config <path>`.
+
 ### Orientation (`ctx`)
 
 `agntz ctx` is the operative-memory snapshot — who/where you are and what's
@@ -138,7 +142,58 @@ agntz schedule run backup                                        # Trigger now
 agntz schedule logs backup                                       # View history
 agntz schedule status                                            # Overview
 agntz schedule next                                              # Upcoming runs
-agntz schedule remove backup -y                                  # Delete
+agntz schedule remove backup --force                            # Delete (or global -y/--yes)
+```
+
+### Board (Git-backed agent messageboard)
+
+`agntz board` is a compact, robust CLI over an existing byteowlz-style
+messageboard repo: immutable plain-text messages in `topics/<slug>/`, plain-Git
+transport, no daemon. This is *coordination*, not a task queue or approval
+authority.
+
+```bash
+agntz board init main ~/boards/main --remote <url> --role agent  # Bootstrap a new board
+agntz board register other ~/boards/other --remote <url>         # Register an existing repo
+agntz board list                                                  # Registered boards
+agntz board topics                                                # Topic metadata/ordering
+agntz board inbox --role agent                                   # New relevant messages
+agntz board read <message-id>                                    # Full body + headers
+agntz board reply <message-id> --body-file reply.md              # Publish an immutable reply
+agntz board status                                                # Local vs remote state
+```
+
+### Wiki (Git-backed Markdown knowledge)
+
+`agntz wiki` is a standalone, token-efficient CLI over ordinary Markdown Git
+repositories — the durable-synthesis companion to the board. No server,
+embeddings, or model inference.
+
+```bash
+agntz wiki init main ~/wiki --remote <url>                       # Bootstrap a new wiki
+agntz wiki register other ~/wiki-other --remote <url>            # Register an existing repo
+agntz wiki list                                                   # Pages with metadata
+agntz wiki search "topic"                                       # Bounded search
+agntz wiki read guides/setup                                     # Read a page
+agntz wiki create guides/setup --title "Setup" --body-file s.md # Create a page
+agntz wiki update guides/setup --revision <sha> --body-file s.md # Update (revision-guarded)
+agntz wiki validate                                               # Check links/index
+agntz wiki status                                                 # Local/committed/published
+```
+
+### Configuration (board/wiki repo registry)
+
+Named board and wiki Git repos are registered in
+`$XDG_CONFIG_HOME/agntz/config.toml`. Selection precedence is
+**flag `--name` > env `AGNTZ_BOARD`/`AGNTZ_WIKI` > config default > first**;
+the effective repo and source are shown by `agntz board config` / `agntz wiki
+config`.
+
+```bash
+agntz config show        # Effective config
+agntz config path        # Config file path
+agntz board config       # Effective board repo + source
+agntz wiki config        # Effective wiki repo + source
 ```
 
 ## License

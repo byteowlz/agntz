@@ -12,7 +12,7 @@
 //! `result` carries the underlying tool's structured value when it is JSON,
 //! or its raw text otherwise — always a legal JSON document.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Run a wrapped tool, returning (success, stdout, stderr). Never panics.
 pub fn run(tool: &str, args: &[String]) -> (bool, String, String) {
@@ -45,7 +45,10 @@ pub fn emit(verb: &str, ok: bool, error: Option<String>, result: Value) {
         "error": error,
         "result": result,
     });
-    println!("{}", serde_json::to_string_pretty(&envelope).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&envelope).unwrap_or_default()
+    );
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@
 //! the handful of MCP methods a one-tool server needs.
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::ctx;
@@ -42,12 +42,12 @@ pub async fn run() -> Result<()> {
                 continue;
             }
         };
-        if let Some(resp) = dispatch(&msg) {
-            if let Ok(out) = serde_json::to_string(&resp) {
-                println!("{out}");
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
+        if let Some(resp) = dispatch(&msg)
+            && let Ok(out) = serde_json::to_string(&resp)
+        {
+            println!("{out}");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
         }
     }
     Ok(())
@@ -70,11 +70,7 @@ fn dispatch(msg: &Value) -> Option<Value> {
         "tools/list" => Some(make_response(id, tools_list())),
         "tools/call" => Some(handle_tool_call(id, params)),
         // Legacy/newer handshake shape: some clients send a top-level object.
-        m if id.is_some() => Some(make_error(
-            id,
-            -32601,
-            format!("Method not found: {m}"),
-        )),
+        m if id.is_some() => Some(make_error(id, -32601, format!("Method not found: {m}"))),
         _ => None,
     }
 }
@@ -114,19 +110,19 @@ fn handle_tool_call(id: Option<Value>, params: Value) -> Value {
     }
 
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-    let fleet = args
-        .get("fleet")
-        .and_then(|f| f.as_bool())
-        .unwrap_or(false);
+    let fleet = args.get("fleet").and_then(|f| f.as_bool()).unwrap_or(false);
 
     // Run the orientation snapshot synchronously (lightweight reads).
     let snapshot = ctx::snapshot(fleet);
     let text = serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string());
 
-    make_response(id, json!({
-        "content": [ { "type": "text", "text": text } ],
-        "isError": false
-    }))
+    make_response(
+        id,
+        json!({
+            "content": [ { "type": "text", "text": text } ],
+            "isError": false
+        }),
+    )
 }
 
 fn make_response(id: Option<Value>, result: Value) -> Value {

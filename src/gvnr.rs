@@ -47,22 +47,28 @@ pub struct FleetView {
     pub self_resolved: Option<SelfResolved>,
 }
 
-/// Resolve fleet config from the environment. Returns (endpoint, token).
-///
-/// Precedence: `AGNTZ_GVNR_URL` (+ `AGNTZ_GVNR_TOKEN`) → gvnr CLI when
-/// `AGNTZ_GVNR_BIN` is set (treats the binary as a thin over-the-wire shell
-/// with `--json`). If none, the fleet view is simply unavailable.
-fn config() -> Option<(String, String)> {
-    let url = std::env::var("AGNTZ_GVNR_URL").ok().filter(|s| !s.is_empty())?;
-    let token = std::env::var("AGNTZ_GVNR_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    Some((url, token))
-}
-
 /// Request the fleet view over the wire. `include` gates whether we even try
 /// (default `ctx` keeps the fleet optional behind `--gvnr`).
 pub fn fleet_view(include: bool) -> FleetView {
+    let cfg = std::env::var("AGNTZ_GVNR_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .and_then(|url| {
+            std::env::var("AGNTZ_GVNR_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|token| (url, token))
+        });
+    let cli = std::env::var("AGNTZ_GVNR_BIN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    fleet_view_from(include, cfg, cli.as_deref())
+}
+
+/// Core fleet-view resolution from an explicit config (endpoint/token) and an
+/// optional CLI binary. Separated so tests can exercise every branch without
+/// mutating the process-global environment.
+fn fleet_view_from(include: bool, cfg: Option<(String, String)>, cli: Option<&str>) -> FleetView {
     if !include {
         return FleetView {
             available: false,
@@ -71,21 +77,19 @@ pub fn fleet_view(include: bool) -> FleetView {
         };
     }
 
-    let (url, token) = match config() {
+    let (url, token) = match cfg {
         Some(c) => c,
         None => {
             return FleetView {
                 available: false,
-                reason: Some(
-                    "gvnr not configured (set AGNTZ_GVNR_URL + AGNTZ_GVNR_TOKEN)".into(),
-                ),
+                reason: Some("gvnr not configured (set AGNTZ_GVNR_URL + AGNTZ_GVNR_TOKEN)".into()),
                 ..Default::default()
-            }
+            };
         }
     };
 
-    if let Some(cli) = std::env::var("AGNTZ_GVNR_BIN").ok().filter(|s| !s.is_empty()) {
-        return via_cli(&cli);
+    if let Some(cli) = cli {
+        return via_cli(cli);
     }
 
     via_wire(&url, &token)
@@ -93,22 +97,20 @@ pub fn fleet_view(include: bool) -> FleetView {
 
 fn via_cli(cli: &str) -> FleetView {
     let mut view = FleetView::default();
-    let list = Command::new(cli)
-        .args(["list", "--json"])
-        .output()
-        .ok();
+    let list = Command::new(cli).args(["list", "--json"]).output().ok();
     match list {
-        Some(o) if o.status.success() => match serde_json::from_slice::<serde_json::Value>(&o.stdout)
-        {
-            Ok(v) => {
-                view.available = true;
-                view.runners = parse_runners(&v).or(Some(Vec::new()));
+        Some(o) if o.status.success() => {
+            match serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                Ok(v) => {
+                    view.available = true;
+                    view.runners = parse_runners(&v).or(Some(Vec::new()));
+                }
+                Err(_) => {
+                    view.available = false;
+                    view.reason = Some("gvnr CLI output unparseable".into());
+                }
             }
-            Err(_) => {
-                view.available = false;
-                view.reason = Some("gvnr CLI output unparseable".into());
-            }
-        },
+        }
         _ => {
             view.available = false;
             view.reason = Some("gvnr CLI unavailable/failed".into());
@@ -141,14 +143,14 @@ fn via_wire(url: &str, token: &str) -> FleetView {
     }
 
     // GET /resolve/{self} (wire ResolveResp) — best-effort; never fails the view.
-    if let Ok(agent_id) = std::env::var("AGENT_CTX_AGENT_ID") {
-        if !agent_id.is_empty() {
-            let path = format!("/resolve/{}", urlencode(&agent_id));
-            if let Ok(body) = http_get(url, &path, token) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                    view.self_resolved = parse_resolve(&v, &agent_id);
-                }
-            }
+    if let Ok(agent_id) = std::env::var("AGENT_CTX_AGENT_ID")
+        && !agent_id.is_empty()
+    {
+        let path = format!("/resolve/{}", urlencode(&agent_id));
+        if let Ok(body) = http_get(url, &path, token)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&body)
+        {
+            view.self_resolved = parse_resolve(&v, &agent_id);
         }
     }
 
@@ -164,22 +166,48 @@ fn parse_runners(v: &serde_json::Value) -> Option<Vec<Runner>> {
         v
     };
     let arr = runners.as_array()?;
-    Some(arr.iter().map(|r| Runner {
-        runner_id: r.get("runner_id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        mesh_ip: r.get("mesh_ip").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        last_beat: r.get("last_beat").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-        rank: r.get("rank").and_then(|x| x.as_f64()),
-        free_vram_gb: r.get("free_vram_gb").and_then(|x| x.as_f64()),
-    }).collect())
+    Some(
+        arr.iter()
+            .map(|r| Runner {
+                runner_id: r
+                    .get("runner_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                mesh_ip: r
+                    .get("mesh_ip")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                last_beat: r
+                    .get("last_beat")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                rank: r.get("rank").and_then(|x| x.as_f64()),
+                free_vram_gb: r.get("free_vram_gb").and_then(|x| x.as_f64()),
+            })
+            .collect(),
+    )
 }
 
 fn parse_resolve(v: &serde_json::Value, id: &str) -> Option<SelfResolved> {
     let payload = v.get("payload").unwrap_or(v);
-    let found = payload.get("found").and_then(|x| x.as_bool()).unwrap_or(false);
+    let found = payload
+        .get("found")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     Some(SelfResolved {
-        id: payload.get("id").and_then(|x| x.as_str()).unwrap_or(id).to_string(),
+        id: payload
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or(id)
+            .to_string(),
         found,
-        address: payload.get("address").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        address: payload
+            .get("address")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
     })
 }
 
@@ -225,7 +253,10 @@ fn parse_url(url: &str) -> std::io::Result<(String, u16)> {
         _ => (hostport.to_string(), 80),
     };
     if host.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty host"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty host",
+        ));
     }
     Ok((host, port))
 }
@@ -237,9 +268,7 @@ fn urlencode(s: &str) -> String {
             _ => {
                 let mut b = [0u8; 4];
                 let s = c.encode_utf8(&mut b).as_bytes();
-                s.iter()
-                    .map(|&x| format!("%{:02X}", x))
-                    .collect::<String>()
+                s.iter().map(|&x| format!("%{:02X}", x)).collect::<String>()
             }
         })
         .collect()
@@ -253,7 +282,10 @@ mod tests {
 
     #[test]
     fn parse_url_defaults() {
-        assert_eq!(parse_url("http://100.64.0.5:8080").unwrap(), ("100.64.0.5".into(), 8080));
+        assert_eq!(
+            parse_url("http://100.64.0.5:8080").unwrap(),
+            ("100.64.0.5".into(), 8080)
+        );
         assert_eq!(parse_url("100.64.0.5").unwrap(), ("100.64.0.5".into(), 80));
         assert_eq!(
             parse_url("https://gvnr.byteowlz.dev").unwrap(),
@@ -270,13 +302,16 @@ mod tests {
 
     #[test]
     fn not_configured_is_unavailable() {
-        std::env::remove_var("AGNTZ_GVNR_URL");
-        std::env::remove_var("AGNTZ_GVNR_TOKEN");
-        std::env::remove_var("AGNTZ_GVNR_BIN");
         // Include=true but no config → unavailable without panicking.
-        let v = fleet_view(true);
+        let v = fleet_view_from(true, None, None);
         assert!(!v.available);
         assert!(v.reason.is_some());
+    }
+
+    #[test]
+    fn omitted_is_unavailable() {
+        let v = fleet_view_from(false, Some(("http://x".into(), "t".into())), None);
+        assert!(!v.available);
     }
 
     #[test]

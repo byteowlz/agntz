@@ -1,0 +1,35 @@
+# ============================================
+# CLIPPY CONFIGURATION
+# ============================================
+# Place this file in your project root (next to Cargo.toml)
+# These thresholds complement the lint configuration in Cargo.toml
+
+# Complexity thresholds - prevent sprawling functions
+cognitive-complexity-threshold = 30
+type-complexity-threshold = 250
+too-many-lines-threshold = 250
+
+# Domain terms that shouldn't trigger spelling warnings in docs
+doc-valid-idents = [
+    "LLM",      # Large Language Model
+    "AI",       # Artificial Intelligence
+    "API",      # Application Programming Interface
+    "CLI",      # Command Line Interface
+    "TUI",      # Terminal User Interface
+    "AST",      # Abstract Syntax Tree
+    "MCP",      # Model Context Protocol
+    "PTY",      # Pseudo-terminal
+    "JSON",     # JavaScript Object Notation
+    "TOML",     # Tom's Obvious Minimal Language
+    "UUID",     # Universally Unique Identifier
+    "URL",      # Uniform Resource Locator
+    "HTTP",     # HyperText Transfer Protocol
+    "HTTPS",    # HTTP Secure
+    "agntz",    # The tool itself
+    "mmry",     # Memory store
+    "trx",      # Issue tracker
+    "hstry",    # Session history store
+    "skdlr",    # Scheduler
+    "board",    # Agent messageboard
+    "wiki",     # Knowledge wiki
+]

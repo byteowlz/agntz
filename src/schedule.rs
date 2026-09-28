@@ -62,9 +62,9 @@ pub enum ScheduleCommand {
     Remove {
         /// Schedule name
         name: String,
-        /// Skip confirmation
-        #[arg(short = 'y', long)]
-        yes: bool,
+        /// Skip confirmation (the global `-y/--yes` also applies)
+        #[arg(short = 'f', long = "force")]
+        force: bool,
     },
 
     /// Enable a schedule
@@ -110,7 +110,7 @@ pub enum ScheduleCommand {
     Doctor,
 }
 
-pub async fn handle(command: ScheduleCommand, json: bool) -> Result<()> {
+pub async fn handle(command: ScheduleCommand, json: bool, assume_yes: bool) -> Result<()> {
     match command {
         ScheduleCommand::Add {
             name,
@@ -129,7 +129,7 @@ pub async fn handle(command: ScheduleCommand, json: bool) -> Result<()> {
             workdir,
             description,
         } => handle_edit(name, schedule, command, workdir, description).await,
-        ScheduleCommand::Remove { name, yes } => handle_remove(name, yes).await,
+        ScheduleCommand::Remove { name, force } => handle_remove(name, force || assume_yes).await,
         ScheduleCommand::Enable { name } => handle_enable(name).await,
         ScheduleCommand::Disable { name } => handle_disable(name).await,
         ScheduleCommand::Run { name, dry_run } => handle_run(name, dry_run).await,
@@ -263,7 +263,12 @@ async fn handle_logs(name: String, last: usize, json: bool) -> Result<()> {
     if json {
         emit_skdlr(
             "schedule/logs",
-            &["logs".to_string(), name, "--last".to_string(), last.to_string()],
+            &[
+                "logs".to_string(),
+                name,
+                "--last".to_string(),
+                last.to_string(),
+            ],
         )
     } else {
         run_skdlr(&[
