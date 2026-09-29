@@ -121,6 +121,131 @@ fn read_agent_ctx_from(env: &dyn Fn(&str) -> Option<String>) -> AgentCtx {
     ctx
 }
 
+/// Automatic provenance for durable entries (board messages, wiki pages).
+/// Derived from [`AGENT_CTX`] so every artifact is traceable to the agent,
+/// session, host and workspace that produced it — without manual stamping.
+#[derive(Debug, Clone, Serialize)]
+pub struct Provenance {
+    /// Harness / harness name (e.g. "pi", "opencode").
+    pub agent: String,
+    /// Opaque per-session id (harness session id, else a stable readable name,
+    /// else a generated UUID reused only within this process).
+    pub session: String,
+    /// Host: node hostname, else machine id, else OS hostname.
+    pub host: String,
+    /// Stable machine id when AGENT_CTX provides one.
+    pub machine: Option<String>,
+    /// Oqto Workspace collection id when AGENT_CTX provides one.
+    pub workspace: Option<String>,
+    /// Opaque agent id when AGENT_CTX provides one.
+    pub agent_id: Option<String>,
+}
+
+/// Build [`Provenance`] from the current process environment.
+///
+/// Prefers [`AGENT_CTX`] (the authoritative producer-map), falls back to the
+/// `AGENT_*` env vars and OS hostname, and never emits empty identity fields.
+#[must_use]
+pub fn provenance() -> Provenance {
+    let ctx = read_agent_ctx();
+
+    let agent = ctx
+        .val("harness", "HARNESS")
+        .filter(|s| !s.is_empty())
+        .or_else(|| env_agent("AGENT_HARNESS"))
+        .unwrap_or_else(|| "unknown-agent".to_string());
+
+    let session = ctx
+        .val("harness", "HARNESS_SESSION_ID")
+        .or_else(|| ctx.val("harness", "SESSION_NAME"))
+        .or_else(|| ctx.val("harness", "READABLE_ID"))
+        .or_else(|| ctx.lineage.platform_session_id.clone())
+        .or_else(|| env_agent("AGENT_SESSION_ID"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(uuid_v4);
+
+    let host = ctx
+        .val("host", "NODE_HOSTNAME")
+        .or_else(|| ctx.val("host", "MACHINE_ID"))
+        .or_else(|| env_agent("AGENT_HOST"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| hostname().unwrap_or_else(|| "unknown-host".to_string()));
+
+    Provenance {
+        agent,
+        session,
+        host,
+        machine: ctx.lineage.machine_id.clone().filter(|s| !s.is_empty()),
+        workspace: ctx.lineage.workspace_id.clone().filter(|s| !s.is_empty()),
+        agent_id: ctx.lineage.agent_id.clone().filter(|s| !s.is_empty()),
+    }
+}
+
+fn env_agent(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|s| !s.is_empty())
+}
+
+/// Generate a random version-4 UUID string (no extra dependency).
+#[must_use]
+pub fn uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn getrandom_bytes(buf: &mut [u8]) {
+    use std::io::Read;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(buf);
+        return;
+    }
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (u64::from(std::process::id())) << 32;
+    for b in buf.iter_mut() {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *b = (seed >> 33) as u8;
+    }
+}
+
+fn hostname() -> Option<String> {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let out = Command::new("hostname").arg("-s").output().ok()?;
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
 impl AgentCtx {
     #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {

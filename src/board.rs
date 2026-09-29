@@ -651,33 +651,21 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Agent identity detected for board messages.
+/// Agent identity + provenance for board messages. Identity is sourced
+/// automatically from `AGENT_CTX` so every message is traceable to the agent,
+/// session, host and workspace that produced it.
 #[derive(Debug, Clone)]
 struct Identity {
     role: String,
     agent: String,
     host: String,
     session: String,
+    machine: Option<String>,
+    workspace: Option<String>,
 }
 
 fn detect_identity(role: Option<&str>, fallback_repo_role: Option<&str>) -> Identity {
-    let harness = std::env::var("AGENT_HARNESS")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".into());
-    let session = std::env::var("AGENT_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("AGENT_SESSION_NAME")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(uuid_v4);
-    let host = std::env::var("AGENT_HOST")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| hostname().unwrap_or_else(|| "unknown-host".into()));
+    let p = crate::ctx::provenance();
     let role = role
         .or(fallback_repo_role)
         .filter(|s| !s.is_empty())
@@ -685,9 +673,11 @@ fn detect_identity(role: Option<&str>, fallback_repo_role: Option<&str>) -> Iden
         .to_string();
     Identity {
         role,
-        agent: harness,
-        host,
-        session,
+        agent: p.agent,
+        host: p.host,
+        session: p.session,
+        machine: p.machine,
+        workspace: p.workspace,
     }
 }
 
@@ -715,7 +705,7 @@ fn handle_reply(
     }
 
     let now = chrono::Utc::now();
-    let id = uuid_v4();
+    let id = crate::ctx::uuid_v4();
     let stamp = timestamp_name(now);
     let topic_slug = if parent.topic.is_empty() {
         slugify(&parent.id)
@@ -870,6 +860,12 @@ fn build_message(
     out.push_str(&format!("From-Agent: {}\n", identity.agent));
     out.push_str(&format!("From-Host: {}\n", identity.host));
     out.push_str(&format!("From-Session-ID: {}\n", identity.session));
+    if let Some(machine) = identity.machine.as_deref() {
+        out.push_str(&format!("From-Machine: {machine}\n"));
+    }
+    if let Some(workspace) = identity.workspace.as_deref() {
+        out.push_str(&format!("From-Workspace: {workspace}\n"));
+    }
     out.push_str(&format!("To: {to}\n"));
     out.push_str(&format!("In-Reply-To: {}\n", parent.id));
     if let Some(subject) = subject {
@@ -899,67 +895,6 @@ fn read_body(body_file: &str) -> Result<String> {
 #[must_use]
 fn timestamp_name(now: chrono::DateTime<chrono::Utc>) -> String {
     now.format("%Y%m%dT%H%M%SZ").to_string()
-}
-
-/// Generate a random version-4 UUID string.
-#[must_use]
-fn uuid_v4() -> String {
-    // Local reimplementation without extra deps: 128 random bits formatted as a
-    // v4 UUID. Deterministic tests override via AGENT_SESSION_ID when needed.
-    let mut bytes = [0u8; 16];
-    getrandom_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
-}
-
-fn getrandom_bytes(buf: &mut [u8]) {
-    use std::io::Read;
-    if let Ok(mut f) = fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(buf);
-        return;
-    }
-    let mut seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        ^ (std::process::id() as u64) << 32;
-    for b in buf.iter_mut() {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *b = (seed >> 33) as u8;
-    }
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            let out = gitx::run(Path::new("."), &["config", "--get", "user.hostname"]);
-            out.ok
-                .then(|| out.out().to_string())
-                .filter(|s| !s.is_empty())
-        })
 }
 
 fn handle_init(

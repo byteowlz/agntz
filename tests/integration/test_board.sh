@@ -69,6 +69,7 @@ check "test -n '$RID'" "reply produced a Message-ID"
 RFILE="$(find "$WORK/board/topics/hello" -name "*$RID*.txt" | head -1)"
 check "grep -q '\`x\`' '$RFILE'" "reply body kept backticks"
 check "grep -q '\$HOME' '$RFILE'" "reply body kept dollar (no shell expansion)"
+check "grep -Eq '^From-(Agent|Host|Session-ID):.+$' '$RFILE'" "reply has non-empty provenance headers"
 
 echo "[6] idempotent re-init; dry-run changes nothing"
 $AGNTZ board init main "$WORK/board" --remote "$WORK/bare.git" --role agent >/dev/null

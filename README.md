@@ -196,6 +196,20 @@ agntz board config       # Effective board repo + source
 agntz wiki config        # Effective wiki repo + source
 ```
 
+### Automatic provenance (`AGENT_CTX`)
+
+Board messages and wiki pages are stamped automatically from [`AGENT_CTX`] so
+every durable entry is traceable to the agent, session, host, machine and
+Workspace that produced it — no manual stamping.
+
+- Board replies add `From-Agent` / `From-Host` / `From-Session-ID`, plus
+  `From-Machine` / `From-Workspace` when `AGENT_CTX` provides them.
+- Wiki pages carry `source-agent` / `source-session` / `source-host` (and
+  `source-machine` / `source-workspace`) in front matter on create; updates
+  preserve the author and add `updated-by-agent` / `-session` / `-host`.
+- Values come from `AGENT_CTX` (the authoritative producer map), falling back
+  to the `AGENT_*` env vars and OS hostname — never empty.
+
 ## License
 
 MIT

@@ -40,6 +40,7 @@ echo "[3] wiki create / list / search / read / validate"
 printf '# Guide\n\nThis is a guide about `code` and $HOME.\n' > "$WORK/page.md"
 $AGNTZ wiki create guides/setup --title "Setup Guide" --body-file "$WORK/page.md" >/dev/null
 check "$AGNTZ wiki list | grep -q 'guides/setup'" "list shows new page"
+check "grep -Eq '^source-(agent|session|host):.+$' '$WORK/wiki/pages/guides/setup.md'" "published page carries AGENT_CTX provenance"
 check "$AGNTZ wiki search guide --json" "search --json"
 check "$AGNTZ wiki read guides/setup | grep -q 'Setup Guide'" "read returns page"
 check "$AGNTZ wiki validate" "validate (no broken links)"

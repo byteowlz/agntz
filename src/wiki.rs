@@ -5,7 +5,7 @@
 //! knowledge; trx holds implementation status; mmry holds recall. No server,
 //! embeddings, or model inference required.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -236,6 +236,8 @@ struct Page {
     title: String,
     status: Option<String>,
     kind: Option<String>,
+    /// Full front matter (key -> value), including provenance fields.
+    front: BTreeMap<String, String>,
     body: String,
 }
 
@@ -247,11 +249,13 @@ fn parse_page(path: &Path, id: &str, rel: &str) -> Result<Page> {
     let mut title = id.rsplit('/').next().unwrap_or(id).to_string();
     let mut status = None;
     let mut kind = None;
+    let mut front_map = BTreeMap::new();
     if let Some(front) = front {
         for line in front.lines() {
             if let Some((k, v)) = line.split_once(':') {
                 let key = k.trim();
                 let val = v.trim().trim_matches('"');
+                front_map.insert(key.to_string(), val.to_string());
                 match key {
                     "title" => title = val.to_string(),
                     "status" => status = Some(val.to_string()),
@@ -268,6 +272,7 @@ fn parse_page(path: &Path, id: &str, rel: &str) -> Result<Page> {
         title,
         status,
         kind,
+        front: front_map,
         body: body.to_string(),
     })
 }
@@ -507,7 +512,8 @@ fn handle_create(
         .map(str::to_string)
         .unwrap_or_else(|| page_id.rsplit('/').next().unwrap_or(page_id).to_string());
     let body = read_body(body_file)?;
-    let content = render_page(&title, status, kind, &body);
+    let author = crate::ctx::provenance();
+    let content = render_from_front(&build_front(&title, status, kind, &author), &body);
 
     if preview {
         println!("{content}");
@@ -569,15 +575,10 @@ fn handle_update(
 
     let page = parse_page(&page_path, page_id, page_id)?;
     let body = read_body(body_file)?;
-    let content = render_page(
-        &page.title,
-        page.status.as_deref(),
-        page.kind.as_deref(),
-        &body,
-    );
 
-    // No-op: identical content should not create an empty commit.
-    if fs::read_to_string(&page_path).unwrap_or_default() == content {
+    // No-op: identical body should not create an empty commit.
+    let new_body = body.trim_start();
+    if page.body.trim_end() == new_body.trim_end() {
         if ctx.common.json {
             readout::emit(
                 "wiki/update",
@@ -590,6 +591,19 @@ fn handle_update(
         }
         return Ok(());
     }
+
+    // Preserve the original author provenance, stamp the updater.
+    let updater = crate::ctx::provenance();
+    let mut front = page.front.clone();
+    front.insert("title".to_string(), page.title.clone());
+    if let Some(s) = &page.status {
+        front.insert("status".to_string(), s.clone());
+    }
+    if let Some(k) = &page.kind {
+        front.insert("kind".to_string(), k.clone());
+    }
+    stamp_updater(&mut front, &updater);
+    let content = render_from_front(&front, &body);
 
     if preview {
         println!("{content}");
@@ -622,14 +636,39 @@ fn handle_update(
     Ok(())
 }
 
-fn render_page(title: &str, status: Option<&str>, kind: Option<&str>, body: &str) -> String {
-    let mut out = String::from("---\n");
-    out.push_str(&format!("title: {title}\n"));
-    if let Some(status) = status {
-        out.push_str(&format!("status: {status}\n"));
+/// Build a front-matter map for a new page: title/status/kind plus the
+/// author provenance (sourced automatically from `AGENT_CTX`).
+fn build_front(
+    title: &str,
+    status: Option<&str>,
+    kind: Option<&str>,
+    author: &crate::ctx::Provenance,
+) -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    m.insert("title".to_string(), title.to_string());
+    if let Some(s) = status {
+        m.insert("status".to_string(), s.to_string());
     }
-    if let Some(kind) = kind {
-        out.push_str(&format!("kind: {kind}\n"));
+    if let Some(k) = kind {
+        m.insert("kind".to_string(), k.to_string());
+    }
+    m.insert("source-agent".to_string(), author.agent.clone());
+    m.insert("source-session".to_string(), author.session.clone());
+    m.insert("source-host".to_string(), author.host.clone());
+    if let Some(machine) = &author.machine {
+        m.insert("source-machine".to_string(), machine.clone());
+    }
+    if let Some(workspace) = &author.workspace {
+        m.insert("source-workspace".to_string(), workspace.clone());
+    }
+    m
+}
+
+/// Render a page body wrapped in the given front-matter map.
+fn render_from_front(front: &BTreeMap<String, String>, body: &str) -> String {
+    let mut out = String::from("---\n");
+    for (k, v) in front {
+        out.push_str(&format!("{k}: {v}\n"));
     }
     out.push_str("---\n\n");
     out.push_str(body.trim_start());
@@ -637,6 +676,15 @@ fn render_page(title: &str, status: Option<&str>, kind: Option<&str>, body: &str
         out.push('\n');
     }
     out
+}
+
+/// Stamp the *updater* provenance onto a page's front matter, preserving the
+/// original author (`source-*`) and replacing any earlier `updated-by-*`.
+fn stamp_updater(front: &mut BTreeMap<String, String>, updater: &crate::ctx::Provenance) {
+    front.retain(|k, _| !k.starts_with("updated-by-"));
+    front.insert("updated-by-agent".to_string(), updater.agent.clone());
+    front.insert("updated-by-session".to_string(), updater.session.clone());
+    front.insert("updated-by-host".to_string(), updater.host.clone());
 }
 
 fn write_and_publish(
