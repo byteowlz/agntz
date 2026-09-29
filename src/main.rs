@@ -306,10 +306,29 @@ async fn try_main() -> Result<()> {
     let cli = Cli::parse();
     let ctx = RuntimeContext::new(cli.common.clone())?;
 
-    match cli.command {
+    let result: Result<()> = async { dispatch(cli.command, &ctx).await }.await;
+
+    if let Err(e) = result {
+        // In --json mode always emit the stable envelope on failure too, so a
+        // model never has to parse non-JSON stderr.
+        if ctx.common.json {
+            readout::emit(
+                "error",
+                false,
+                Some(format!("{e:#}")),
+                serde_json::Value::Null,
+            );
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+async fn dispatch(command: Commands, ctx: &RuntimeContext) -> Result<()> {
+    match command {
         Commands::Memory { command } => memory::handle(command, ctx.common.json).await,
         Commands::Tasks { command } => issues::handle(command, ctx.common.json).await,
-        Commands::Ready => handle_ready(&ctx).await,
+        Commands::Ready => handle_ready(ctx).await,
         Commands::Search {
             query,
             workspace,
@@ -331,7 +350,7 @@ async fn try_main() -> Result<()> {
                 include_tools,
                 include_system,
                 no_dedup,
-                &ctx,
+                ctx,
             )
             .await
         }
@@ -345,10 +364,10 @@ async fn try_main() -> Result<()> {
             Ok(())
         }
         Commands::Completions { shell } => handle_completions(shell),
-        Commands::Init { force } => handle_init(force, &ctx).await,
-        Commands::Board { command } => board::handle(command, &ctx),
-        Commands::Wiki { command } => wiki::handle(command, &ctx),
-        Commands::Config { command } => handle_config(&ctx, command),
+        Commands::Init { force } => handle_init(force, ctx).await,
+        Commands::Board { command } => board::handle(command, ctx),
+        Commands::Wiki { command } => wiki::handle(command, ctx),
+        Commands::Config { command } => handle_config(ctx, command),
     }
 }
 

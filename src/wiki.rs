@@ -21,6 +21,7 @@ use agntz::config::{RepoConfig, select_repo};
 #[derive(Debug, Subcommand)]
 pub enum WikiCommand {
     /// List pages with metadata.
+    #[command(alias = "pages")]
     List {
         /// Select a named wiki repository.
         #[arg(long)]
@@ -290,6 +291,19 @@ fn split_front_matter(raw: &str) -> (Option<&str>, &str) {
     (None, raw)
 }
 
+/// Fetch + fast-forward the wiki to the remote before a read/write so an agent
+/// never operates on a stale clone (docs' "search before creating" flow).
+fn sync_wiki(dir: &Path, repo: &RepoConfig) -> Result<()> {
+    if let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty())
+        && gitx::has_remote(dir, "origin")
+    {
+        let branch = gitx::current_branch(dir).unwrap_or_else(|| "master".to_string());
+        gitx::sync_for_read(dir, "origin", &branch)
+            .map_err(|e| anyhow!("remote sync failed ({remote}): {e}"))?;
+    }
+    Ok(())
+}
+
 /// Scan all pages under the wiki's `pages/` directory.
 fn scan_pages(dir: &Path) -> Result<Vec<Page>> {
     let root = dir.join("pages");
@@ -344,6 +358,7 @@ fn page_map(pages: &[Page]) -> HashMap<String, &Page> {
 fn handle_list(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     let pages = scan_pages(&dir)?;
 
     if ctx.common.json {
@@ -388,6 +403,7 @@ fn handle_search(
 ) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     let pages = scan_pages(&dir)?;
 
     let query_lower = query.to_ascii_lowercase();
@@ -455,6 +471,7 @@ fn excerpt_of(body: &str, query: &str) -> String {
 fn handle_read(ctx: &RuntimeContext, name: Option<&str>, page_id: &str) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     let pages = scan_pages(&dir)?;
     let page = pages
         .iter()
@@ -500,6 +517,7 @@ fn handle_create(
 ) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     prepare_wiki_tree(&dir)?;
 
     let page_path = resolve_page_path(&dir, page_id)?;
@@ -557,6 +575,7 @@ fn handle_update(
 ) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     let page_path = resolve_page_path(&dir, page_id)?;
     if !page_path.exists() {
         return Err(anyhow!("page '{page_id}' does not exist"));
@@ -730,6 +749,7 @@ fn write_and_publish(
 fn handle_validate(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     let pages = scan_pages(&dir)?;
     let map = page_map(&pages);
 
@@ -753,15 +773,23 @@ fn handle_validate(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
         }
     }
 
+    let broken_json = broken
+        .iter()
+        .map(|(a, b)| serde_json::json!({"from": a, "target": b}))
+        .collect::<Vec<_>>();
+
     if ctx.common.json {
+        // Keep the machine contract consistent with the text path: broken links
+        // mean the validation is NOT ok.
+        let ok = broken.is_empty();
         readout::emit(
             "wiki/validate",
-            true,
-            None,
+            ok,
+            (!ok).then(|| format!("{} broken link(s) found", broken.len())),
             serde_json::json!({
                 "repo": repo.name,
                 "page_count": pages.len(),
-                "broken": broken.iter().map(|(a, b)| serde_json::json!({"from": a, "target": b})).collect::<Vec<_>>(),
+                "broken": broken_json,
             }),
         );
         return Ok(());
@@ -799,15 +827,35 @@ fn extract_links(body: &str) -> Vec<String> {
 fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    sync_wiki(&dir, repo)?;
     if !gitx::is_repo(&dir) {
         return Err(anyhow!("{} is not a git repository", dir.display()));
     }
     let branch = gitx::current_branch(&dir).unwrap_or_else(|| "HEAD".to_string());
     let dirty = gitx::is_dirty(&dir);
-    let ahead = gitx::commits_ahead(&dir, "origin", &branch).unwrap_or(0);
+    let remote = repo.remote.as_deref().filter(|s| !s.is_empty());
+    let has_tracking = remote.is_some()
+        && gitx::has_remote(&dir, "origin")
+        && gitx::run(
+            &dir,
+            &["rev-parse", "--verify", &format!("origin/{branch}")],
+        )
+        .ok;
+    let ahead = if has_tracking {
+        gitx::commits_ahead(&dir, "origin", &branch).unwrap_or(0)
+    } else {
+        0
+    };
     let last = gitx::run(&dir, &["log", "-1", "--pretty=%h %s"])
         .out()
         .to_string();
+    let state = if remote.is_some() && !has_tracking {
+        "remote configured but nothing pushed yet"
+    } else if ahead > 0 {
+        "locally committed, not remotely published"
+    } else {
+        "in sync with remote"
+    };
 
     if ctx.common.json {
         readout::emit(
@@ -820,7 +868,8 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
                 "branch": branch,
                 "dirty": dirty,
                 "commits_ahead": ahead,
-                "state": if ahead > 0 { "locally committed" } else { "in sync" },
+                "has_tracking": has_tracking,
+                "state": state,
                 "last_commit": last,
             }),
         );
@@ -832,6 +881,7 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     println!("dirty:   {dirty}");
     println!("ahead:   {ahead} unpushed commit(s)");
     println!("last:    {last}");
+    println!("state:   {state}");
     Ok(())
 }
 
@@ -925,8 +975,10 @@ fn handle_init(
     }
     fs::create_dir_all(&expanded).with_context(|| format!("creating {}", expanded.display()))?;
     gitx::init(&expanded)?;
-    fs::create_dir_all(expanded.join("pages"))
-        .with_context(|| format!("creating {}", expanded.join("pages").display()))?;
+    let pages = expanded.join("pages");
+    fs::create_dir_all(&pages).with_context(|| format!("creating {}", pages.display()))?;
+    // Track the (initially empty) pages dir so clones keep it.
+    fs::write(pages.join(".gitkeep"), "").ok();
     let index = expanded.join("index.md");
     if !index.exists() {
         fs::write(&index, wiki_starter_index())
@@ -948,6 +1000,9 @@ fn handle_init(
     gitx::ensure_identity(&expanded)?;
     gitx::add(&expanded, &["index.md", "README.md", "AGENTS.md", "pages"])?;
     gitx::commit(&expanded, &format!("wiki: initialize {name}"))?;
+
+    // When a remote was explicitly given, publish the initial commit.
+    crate::board::publish_initial(&expanded, remote, name)?;
 
     register_config(ctx, name, &expanded, remote, default)?;
 
@@ -988,11 +1043,11 @@ fn handle_register(
     {
         gitx::run_need(&expanded, &["remote", "add", "origin", url])?;
     }
-    if !expanded.join("pages").is_dir() {
-        return Err(anyhow!(
-            "{} has no pages/ directory; not a supported wiki layout",
-            expanded.display()
-        ));
+    // Ensure the layout: create a missing empty pages/ dir (clone of an
+    // untracked-empty-layout repo), never convert content.
+    let pages = expanded.join("pages");
+    if !pages.is_dir() {
+        fs::create_dir_all(&pages).with_context(|| format!("creating {}", pages.display()))?;
     }
     if ctx.common.dry_run {
         log::info!(

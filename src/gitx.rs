@@ -189,6 +189,24 @@ pub fn fetch(dir: &Path, remote: &str) -> Result<()> {
     Ok(())
 }
 
+/// Fetch and fast-forward the working tree to the remote tracking branch for a
+/// READ. Returns `Ok` even if `remote/branch` does not yet exist (e.g. a fresh
+/// remote that has never been pushed to), so a local-only/brand-new repo still
+/// scans its local tree. Never force-moves or discards local work.
+///
+/// # Errors
+///
+/// Returns an error if the fetch fails or the fast-forward fails (e.g. the
+/// local tree has diverged or is dirty).
+pub fn sync_for_read(dir: &Path, remote: &str, branch: &str) -> Result<()> {
+    fetch(dir, remote)?;
+    let track = format!("{remote}/{branch}");
+    if run(dir, &["rev-parse", "--verify", &track]).ok {
+        run_need(dir, &["merge", "--ff-only", &track])?;
+    }
+    Ok(())
+}
+
 /// Rebase the local branch onto `remote`/`branch`.
 ///
 /// # Errors

@@ -121,7 +121,8 @@ pub enum BoardCommand {
     },
 
     /// List registered board repositories.
-    List,
+    #[command(alias = "list")]
+    Repos,
 
     /// Show the effective board repository and config source.
     Config {
@@ -195,7 +196,7 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             role.as_deref(),
             default,
         ),
-        BoardCommand::List => handle_list(ctx),
+        BoardCommand::Repos => handle_list(ctx),
         BoardCommand::Config { name } => handle_config_cmd(ctx, name.as_deref()),
     }
 }
@@ -361,12 +362,12 @@ fn open_repo(_ctx: &RuntimeContext, repo: &RepoConfig, fetch: bool) -> Result<Pa
             path.display()
         ));
     }
-    if fetch
-        && let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty())
-        && let Err(e) = gitx::fetch(&path, "origin")
-    {
-        // A failed fetch must not appear as an empty inbox.
-        return Err(anyhow!("remote fetch failed ({remote}): {e}"));
+    if fetch && let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty()) {
+        // Fetch AND fast-forward so reads see other agents' messages. A failed
+        // fetch must never masquerade as an empty inbox.
+        let branch = gitx::current_branch(&path).unwrap_or_else(|| "master".to_string());
+        gitx::sync_for_read(&path, "origin", &branch)
+            .map_err(|e| anyhow!("remote sync failed ({remote}): {e}"))?;
     }
     Ok(path)
 }
@@ -437,7 +438,7 @@ fn handle_inbox(
     sort_messages(&mut messages);
 
     // Find the cursor position: either a specific message-id or a commit.
-    let cutoff_pos = index_of_cursor(&messages, since);
+    let cutoff_pos = resolve_cursor(&dir, &messages, since)?;
 
     let role_lower = role.to_ascii_lowercase();
     let mut relevant = Vec::new();
@@ -497,8 +498,40 @@ fn handle_inbox(
     Ok(())
 }
 
-fn index_of_cursor(messages: &[Message], since: Option<&str>) -> Option<usize> {
-    messages.iter().position(|m| Some(m.id.as_str()) == since)
+/// Resolve a `--since` value (a message-id or a commit) to a cursor index.
+/// Returns `None` when no cursor is given, an index when it resolves, and an
+/// error when the value is neither a known message-id nor a valid commit.
+fn resolve_cursor(dir: &Path, messages: &[Message], since: Option<&str>) -> Result<Option<usize>> {
+    let Some(since) = since else {
+        return Ok(None);
+    };
+    if let Some(pos) = messages.iter().position(|m| m.id == since) {
+        return Ok(Some(pos));
+    }
+    // Commit reference: the boundary is the last message whose file already
+    // exists in that commit. An incremental reader never silently re-reads.
+    if gitx::run(
+        dir,
+        &["rev-parse", "--verify", &format!("{since}^{{commit}}")],
+    )
+    .ok
+    {
+        let mut last_existed = None;
+        for (idx, m) in messages.iter().enumerate() {
+            let rel = m
+                .path
+                .strip_prefix(dir)
+                .unwrap_or(&m.path)
+                .to_string_lossy();
+            if gitx::run(dir, &["cat-file", "-e", &format!("{since}:{rel}")]).ok {
+                last_existed = Some(idx);
+            }
+        }
+        return Ok(Some(last_existed.unwrap_or(0)));
+    }
+    Err(anyhow!(
+        "invalid --since value '{since}': expected a message-id or a commit reference"
+    ))
 }
 
 fn role_matches(msg: &Message, role_lower: &str) -> bool {
@@ -578,16 +611,24 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Re
     let msg = find_message(&dir, message_id)?;
 
     if ctx.common.json {
-        let mut meta = serde_json::Map::new();
-        meta.insert("repo".into(), serde_json::json!(repo.name));
-        meta.insert("message_id".into(), serde_json::json!(msg.id));
-        meta.insert("topic".into(), serde_json::json!(msg.topic));
-        meta.insert("path".into(), serde_json::json!(msg.path.to_string_lossy()));
+        let mut headers = serde_json::Map::new();
         for (k, v) in &msg.headers {
-            meta.insert(k.clone(), serde_json::json!(v));
+            headers.insert(k.clone(), serde_json::json!(v));
         }
-        meta.insert("body".into(), serde_json::json!(msg.body));
-        let payload = serde_json::Value::Object(meta);
+        let payload = serde_json::json!({
+            "repo": repo.name,
+            "message_id": msg.id,
+            "topic": msg.topic,
+            "path": msg.path.to_string_lossy(),
+            "from": msg.header("From"),
+            "from_agent": msg.header("From-Agent"),
+            "from_host": msg.header("From-Host"),
+            "to": msg.header("To"),
+            "subject": msg.subject(),
+            "sent_at": msg.sent_at(),
+            "headers": headers,
+            "body": msg.body,
+        });
         readout::emit("board/read", true, None, payload);
         return Ok(());
     }
@@ -611,12 +652,35 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     }
     let branch = gitx::current_branch(&dir).unwrap_or_else(|| "HEAD".to_string());
     let dirty = gitx::is_dirty(&dir);
-    let ahead = gitx::commits_ahead(&dir, "origin", &branch).unwrap_or(0);
     let remote = repo.remote.as_deref().filter(|s| !s.is_empty());
-    let unpushed = gitx::unpushed_commits(&dir, "origin", &branch);
+    let has_tracking = remote.is_some()
+        && gitx::has_remote(&dir, "origin")
+        && gitx::run(
+            &dir,
+            &["rev-parse", "--verify", &format!("origin/{branch}")],
+        )
+        .ok;
+    let ahead = if has_tracking {
+        gitx::commits_ahead(&dir, "origin", &branch).unwrap_or(0)
+    } else {
+        0
+    };
+    let unpushed = if has_tracking {
+        gitx::unpushed_commits(&dir, "origin", &branch)
+    } else {
+        Vec::new()
+    };
     let last_commit = gitx::run(&dir, &["log", "-1", "--pretty=%h %s"])
         .out()
         .to_string();
+
+    let state = if remote.is_some() && !has_tracking {
+        "remote configured but nothing pushed yet (no tracking ref)"
+    } else if ahead > 0 {
+        "locally committed, not remotely published"
+    } else {
+        "in sync with remote"
+    };
 
     if ctx.common.json {
         let payload = serde_json::json!({
@@ -627,6 +691,8 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
             "dirty": dirty,
             "commits_ahead": ahead,
             "unpushed": unpushed,
+            "has_tracking": has_tracking,
+            "state": state,
             "last_commit": last_commit,
         });
         readout::emit("board/status", true, None, payload);
@@ -640,14 +706,7 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     println!("dirty:    {dirty}");
     println!("ahead:    {ahead} unpushed commit(s)");
     println!("last:     {last_commit}");
-    println!(
-        "state:    {}",
-        if ahead > 0 {
-            "locally committed, not remotely published"
-        } else {
-            "in sync with remote (or local-only)"
-        }
-    );
+    println!("state:    {state}");
     Ok(())
 }
 
@@ -694,6 +753,11 @@ fn handle_reply(
 ) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
+    if let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty()) {
+        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
+        gitx::sync_for_read(&dir, "origin", &branch)
+            .map_err(|e| anyhow!("remote sync failed ({remote}): {e}"))?;
+    }
     let parent = find_message(&dir, message_id)?;
     prepare_tree(&dir)?;
     gitx::ensure_git()?;
@@ -837,6 +901,27 @@ fn push_with_race_retry(dir: &Path, branch: &str) -> Result<()> {
     }
 }
 
+/// Push the initial commit to `origin` when a remote was explicitly given.
+/// Never force-pushes; a failure is reported but does not abort init (the local
+/// repo stays valid and recoverable).
+pub(crate) fn publish_initial(dir: &Path, remote: Option<&str>, name: &str) -> Result<()> {
+    let Some(remote) = remote.filter(|r| !r.is_empty()) else {
+        return Ok(());
+    };
+    if !gitx::has_remote(dir, "origin") {
+        return Ok(());
+    }
+    let branch = gitx::current_branch(dir).unwrap_or_else(|| "master".to_string());
+    match gitx::run_need(dir, &["push", "-u", "origin", &branch]) {
+        Ok(_) => log::info!("initialized {name}: pushed to origin/{branch}"),
+        Err(e) => eprintln!(
+            "note: initial push to {remote} failed ({e:#}); {} is valid locally, push with `git push -u origin {branch}`",
+            dir.display()
+        ),
+    }
+    Ok(())
+}
+
 fn relpath(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -946,6 +1031,9 @@ fn handle_init(
     gitx::init(&expanded)?;
     let topics = expanded.join("topics");
     fs::create_dir_all(&topics).with_context(|| format!("creating {}", topics.display()))?;
+    // Track the (initially empty) topics dir so clones keep it and `register`
+    // on a clone validates. An empty file is tracked by git.
+    fs::write(topics.join(".gitkeep"), "").ok();
     let readme = expanded.join("README.md");
     if !readme.exists() {
         fs::write(&readme, board_starter_readme())
@@ -963,6 +1051,10 @@ fn handle_init(
     // Initial commit for a brand-new repo.
     gitx::add(&expanded, &["README.md", "AGENTS.md", "topics"])?;
     gitx::commit(&expanded, &format!("board: initialize {name}"))?;
+
+    // When a remote was explicitly given, publish the initial commit so the
+    // fresh remote isn't left empty (an explicit `--remote` opt-in).
+    publish_initial(&expanded, remote, name)?;
 
     register_config(ctx, name, &expanded, remote, role, default)?;
 
@@ -1022,13 +1114,11 @@ fn handle_register(
         gitx::run_need(&expanded, &["remote", "add", "origin", url])?;
     }
 
-    // Validate the board layout, reporting unsupported formats.
+    // Ensure the board layout. A missing (empty) topics/ dir is created so a
+    // clone of an untracked-empty-layout repo still validates; never converted.
     let topics = expanded.join("topics");
     if !topics.is_dir() {
-        return Err(anyhow!(
-            "{} has no topics/ directory; this is not a supported board layout",
-            expanded.display()
-        ));
+        fs::create_dir_all(&topics).with_context(|| format!("creating {}", topics.display()))?;
     }
 
     if ctx.common.dry_run {

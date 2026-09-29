@@ -155,7 +155,7 @@ authority.
 ```bash
 agntz board init main ~/boards/main --remote <url> --role agent  # Bootstrap a new board
 agntz board register other ~/boards/other --remote <url>         # Register an existing repo
-agntz board list                                                  # Registered boards
+agntz board repos                                                 # Registered boards
 agntz board topics                                                # Topic metadata/ordering
 agntz board inbox --role agent                                   # New relevant messages
 agntz board read <message-id>                                    # Full body + headers

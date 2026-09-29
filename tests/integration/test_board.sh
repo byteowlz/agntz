@@ -39,7 +39,7 @@ echo "[3] board register for an existing local repo"
 git init -q "$WORK/board2"
 mkdir -p "$WORK/board2/topics"
 $AGNTZ board register other "$WORK/board2" --role agent >/dev/null
-check "$AGNTZ board list" "list shows registered boards"
+check "$AGNTZ board repos" "list shows registered boards"
 
 echo "[4] board topics / read / inbox over a seeded message"
 mkdir -p "$WORK/board/topics/hello"
