@@ -443,8 +443,8 @@ fn handle_inbox(
     let role_lower = role.to_ascii_lowercase();
     let mut relevant = Vec::new();
     for (idx, m) in messages.iter().enumerate() {
-        if let Some(pos) = cutoff_pos
-            && idx <= pos
+        if let Some(keep) = &cutoff_pos
+            && !keep.contains(&idx)
         {
             continue;
         }
@@ -459,8 +459,10 @@ fn handle_inbox(
     let truncated = messages
         .iter()
         .enumerate()
-        .skip_while(|(idx, _)| cutoff_pos.is_some_and(|pos| *idx <= pos))
-        .filter(|(_, m)| role_matches(m, &role_lower))
+        .filter(|(idx, m)| {
+            let in_keep = cutoff_pos.as_ref().is_none_or(|keep| keep.contains(idx));
+            in_keep && role_matches(m, &role_lower)
+        })
         .count()
         > relevant.len();
 
@@ -501,33 +503,44 @@ fn handle_inbox(
 /// Resolve a `--since` value (a message-id or a commit) to a cursor index.
 /// Returns `None` when no cursor is given, an index when it resolves, and an
 /// error when the value is neither a known message-id nor a valid commit.
-fn resolve_cursor(dir: &Path, messages: &[Message], since: Option<&str>) -> Result<Option<usize>> {
+/// Resolve a `--since <message-id | commit>` cursor to the set of message
+/// indices to show, or `None` when no `since` was given (show everything).
+///
+/// - **message-id**: an incremental cursor from a prior read; show everything
+///   strictly after that message in the ordered list.
+/// - **commit**: show messages whose file does **not** exist at that commit.
+///   Messages are immutable/append-only, so a file absent at the commit was
+///   created after it. This is correct regardless of path-sort order (e.g. a
+///   reply that sorts last by path but was committed earlier).
+fn resolve_cursor(
+    dir: &Path,
+    messages: &[Message],
+    since: Option<&str>,
+) -> Result<Option<Vec<usize>>> {
     let Some(since) = since else {
         return Ok(None);
     };
     if let Some(pos) = messages.iter().position(|m| m.id == since) {
-        return Ok(Some(pos));
+        return Ok(Some((pos + 1..messages.len()).collect()));
     }
-    // Commit reference: the boundary is the last message whose file already
-    // exists in that commit. An incremental reader never silently re-reads.
     if gitx::run(
         dir,
         &["rev-parse", "--verify", &format!("{since}^{{commit}}")],
     )
     .ok
     {
-        let mut last_existed = None;
+        let mut keep = Vec::new();
         for (idx, m) in messages.iter().enumerate() {
             let rel = m
                 .path
                 .strip_prefix(dir)
                 .unwrap_or(&m.path)
                 .to_string_lossy();
-            if gitx::run(dir, &["cat-file", "-e", &format!("{since}:{rel}")]).ok {
-                last_existed = Some(idx);
+            if !gitx::run(dir, &["cat-file", "-e", &format!("{since}:{rel}")]).ok {
+                keep.push(idx);
             }
         }
-        return Ok(Some(last_existed.unwrap_or(0)));
+        return Ok(Some(keep));
     }
     Err(anyhow!(
         "invalid --since value '{since}': expected a message-id or a commit reference"

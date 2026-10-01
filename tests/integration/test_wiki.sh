@@ -71,5 +71,34 @@ check "grep -c 'name = \"main\"' '$WORK/cfg/agntz/config.toml' | grep -q '^1$'" 
 $AGNTZ wiki init dry "$WORK/newwiki" --dry-run >/dev/null 2>&1
 check "test ! -d '$WORK/newwiki'" "dry-run did not create dir"
 
+echo "[7] init --remote pushes the initial commit; clone keeps pages/ layout (P0-3)"
+check "git -C '$WORK/bare.git' rev-parse HEAD >/dev/null" "remote non-empty after init"
+git clone -q "$WORK/bare.git" "$WORK/wc"
+check "test -d '$WORK/wc/pages'" "clone kept pages/ layout (.gitkeep)"
+$AGNTZ wiki register peer "$WORK/wc" --remote "$WORK/bare.git" >/dev/null 2>&1
+
+# Publish a page from the main wiki; the clone is now stale.
+printf '# Fresh\n\nBody.\n' > "$WORK/fresh.md"
+$AGNTZ wiki create guides/fresh --body-file "$WORK/fresh.md" >/dev/null 2>&1
+
+echo "[8] stale clone auto-syncs (fetch+merge) before search (P0-2)"
+# A fresh clone is behind; search must see the new page without a manual pull.
+if $AGNTZ wiki search --name peer 'Fresh' >/dev/null 2>&1; then
+  echo "  ✓ stale clone sees new page in search"; pass=$((pass+1))
+else
+  echo "  ✗ stale clone did not see new page"; fail=$((fail+1))
+fi
+
+check "$AGNTZ wiki list --name peer | grep -q 'guides/fresh'" "stale clone list syncs new page"
+
+echo "[9] validate --json reports ok:true on a clean wiki (P1-5)"
+printf '# Bad\n\n[link](does-not-exist)\n' > "$WORK/bad.md"
+$AGNTZ wiki create guides/bad --body-file "$WORK/bad.md" >/dev/null 2>&1
+BAD_JSON="$(set +e; $AGNTZ wiki validate --json 2>/dev/null || true)"
+check "echo '$BAD_JSON' | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get(\"ok\") is False'" \
+  "validate --json ok:false on broken link"
+VAL_ERR="$(set +e; $AGNTZ wiki validate 2>&1 || true)"
+check "echo '$VAL_ERR' | grep -qi 'broken link'" "validate text names broken link"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

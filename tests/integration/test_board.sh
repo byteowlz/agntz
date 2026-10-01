@@ -79,5 +79,54 @@ $AGNTZ board init dry "$WORK/newboard" --dry-run >/dev/null 2>&1
 check "test ! -d '$WORK/newboard'" "dry-run did not create dir"
 check "test -z \"$(git -C "$WORK/board" status --porcelain)\"" "dry-run leaves board tree clean"
 
+echo "[7] init --remote pushes the initial commit; status is honest"
+
+check "git -C '$WORK/bare.git' rev-parse HEAD >/dev/null" "remote non-empty after init (P0-3)"
+check "$AGNTZ board status | grep -qE 'in sync|locally committed'" "status state honest (P0-3)"
+
+# A second clone of the same remote, kept deliberately stale.
+git clone -q "$WORK/bare.git" "$WORK/peerc"
+$AGNTZ board register peer "$WORK/peerc" --remote "$WORK/bare.git" --role agent >/dev/null
+# Reliability of the layout clone: topics/ must be present (tracked .gitkeep).
+check "test -d '$WORK/peerc/topics'" "clone kept topics/ layout (P0-3 gitkeep)"
+
+# Publish a new message from the main board only; peer clone is now behind.
+mkdir -p "$WORK/board/topics/hello"
+cat > "$WORK/board/topics/hello/20260929T000000Z-22222222-2222-2222-2222-222222222222.txt" <<'EOF'
+Message-ID: 22222222-2222-2222-2222-222222222222
+Sent-At: 2026-09-29T00:00:00Z
+From: other-agent
+From-Agent: pi
+To: agent
+In-Reply-To: none
+
+Subject: Late
+
+Second.
+EOF
+(cd "$WORK/board" && git add -A && git commit -q -m "inbound2" && git push -q origin master)
+
+echo "[8] stale clone auto-syncs (fetch+merge) before a read (P0-1)"
+check "$AGNTZ board inbox --role agent --name peer | grep -q 22222222-2222-2222-2222-222222222222" \
+  "stale clone sees pushed message without manual pull"
+
+FIRST_REV="$(git -C "$WORK/board" rev-parse --short master~1)"
+echo "[9] inbox --since <commit> narrows to messages after it (P1-4)"
+check "$AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 22222222-2222-2222-2222-222222222222" \
+  "--since commit shows the later message"
+check "! $AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 11111111-1111-1111-1111-111111111111" \
+  "--since commit hides the earlier message"
+check "! $AGNTZ board inbox --role agent --since notaref >/dev/null 2>&1" "invalid --since is rejected"
+
+echo "[10] --json failure emits the error envelope (P1-2)"
+# agntz exits non-zero on the error, so capture its JSON stdout and assert.
+ERR_JSON="$(set +e; $AGNTZ board inbox --name nope --json 2>/dev/null || true)"
+check "echo '$ERR_JSON' | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get(\"ok\") is False and d.get(\"verb\")==\"error\"'" \
+  "--json error envelope (ok:false)"
+
+echo "[11] read --json schema matches inbox (lowercase keys, nested headers) (P1-3)"
+check "$AGNTZ board read 22222222-2222-2222-2222-222222222222 --json | python3 -c 'import sys,json; d=json.load(sys.stdin)[\"result\"]; assert \"message_id\" in d and \"headers\" in d'" \
+  "read --json normalized keys"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

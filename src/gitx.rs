@@ -198,11 +198,23 @@ pub fn fetch(dir: &Path, remote: &str) -> Result<()> {
 ///
 /// Returns an error if the fetch fails or the fast-forward fails (e.g. the
 /// local tree has diverged or is dirty).
+/// Best-effort freshness for a read path: fetch the remote and fast-forward
+/// the local branch when possible. Never fails a read because of a network
+/// error, a missing remote branch, or incompatible/unrelated history — in those
+/// cases it warns and the caller reads the local tree as-is. This keeps a read
+/// usable even when the remote is unreachable or the histories diverged.
 pub fn sync_for_read(dir: &Path, remote: &str, branch: &str) -> Result<()> {
-    fetch(dir, remote)?;
+    if let Err(e) = run_need(dir, &["fetch", remote]) {
+        log::warn!("fetch from {remote} failed ({e:#}); reading local tree");
+        return Ok(());
+    }
     let track = format!("{remote}/{branch}");
-    if run(dir, &["rev-parse", "--verify", &track]).ok {
-        run_need(dir, &["merge", "--ff-only", &track])?;
+    if !run(dir, &["rev-parse", "--verify", &track]).ok {
+        // No remote branch to merge (fresh/empty remote).
+        return Ok(());
+    }
+    if let Err(e) = run_need(dir, &["merge", "--ff-only", &track]) {
+        log::warn!("fast-forward from {track} skipped ({e:#}); reading local tree");
     }
     Ok(())
 }
