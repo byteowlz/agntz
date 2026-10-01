@@ -162,7 +162,7 @@ pub fn provenance() -> Provenance {
         .or_else(|| ctx.lineage.platform_session_id.clone())
         .or_else(|| env_agent("AGENT_SESSION_ID"))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(uuid_v4);
+        .unwrap_or_else(fallback_session);
 
     let host = ctx
         .val("host", "NODE_HOSTNAME")
@@ -183,6 +183,15 @@ pub fn provenance() -> Provenance {
 
 fn env_agent(var: &str) -> Option<String> {
     std::env::var(var).ok().filter(|s| !s.is_empty())
+}
+
+/// A session id reused within a single process when the harness exposes none.
+/// Caching it makes repeated provenance reads within one run share the same
+/// `From-Session-ID`, so a session is stable across calls (per-run identity).
+fn fallback_session() -> String {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(uuid_v4).clone()
 }
 
 /// Generate a random version-4 UUID string (no extra dependency).

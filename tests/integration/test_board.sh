@@ -128,5 +128,55 @@ echo "[11] read --json schema matches inbox (lowercase keys, nested headers) (P1
 check "$AGNTZ board read 22222222-2222-2222-2222-222222222222 --json | python3 -c 'import sys,json; d=json.load(sys.stdin)[\"result\"]; assert \"message_id\" in d and \"headers\" in d'" \
   "read --json normalized keys"
 
+echo "[12] reply --new-topic opens a cross-linked new topic"
+"$AGNTZ" board reply 11111111-1111-1111-1111-111111111111 --body-file "$WORK/body.txt" --new-topic spin >/dev/null
+check "test -n \"$(ls "$WORK/board/topics/spin" 2>/dev/null)\"" "--new-topic created the topic dir"
+SPIN="$(find "$WORK/board/topics/spin" -name '*.txt' | head -1)"
+check "grep -q 'In-Reply-To: 11111111-1111-1111-1111-111111111111' '$SPIN'" "--new-topic reply cross-links parent via In-Reply-To"
+
+# A reply into the parent topic, then an idempotent retry.
+R1="$("$AGNTZ" board reply 11111111-1111-1111-1111-111111111111 --body-file "$WORK/body.txt" --idempotency-key op-1 --json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["message_id"])')"
+R2="$("$AGNTZ" board reply 11111111-1111-1111-1111-111111111111 --body-file "$WORK/body.txt" --idempotency-key op-1 --json 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["message_id"])')"
+echo "[13] reply --idempotency-key reuses Message-ID (no duplicate)"
+check "test -n '$R1' && test '$R1' = '$R2'" "idempotent retry reuses same Message-ID"
+TOTAL="$(find "$WORK/board/topics" -name '*.txt' | wc -l)"
+UNIQ="$(find "$WORK/board/topics" -name '*.txt' -exec grep -h '^Message-ID:' {} \; | sort -u | wc -l)"
+check "test '$UNIQ' -eq '$TOTAL'" "no duplicate Message-IDs across the board"
+
+echo "[14] failed fetch is surfaced, not disguised as an empty inbox"
+"$AGNTZ" board init stuck "$WORK/stuck" --remote "http://127.0.0.1:1/none" --role agent >/dev/null 2>&1
+SYNC_JSON="$(set +e; "$AGNTZ" board inbox --role agent --name stuck --json 2>/dev/null || true)"
+check "echo '$SYNC_JSON' | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d[\"result\"][\"sync_warning\"]'" "failed fetch surfaces sync_warning"
+
+echo "[15] two concurrent writers' posts both survive"
+git clone -q "$WORK/bare.git" "$WORK/wc2"
+$AGNTZ board register writer "$WORK/wc2" --remote "$WORK/bare.git" --role agent >/dev/null 2>&1
+printf 'Writer A.\n' > "$WORK/a.txt"
+printf 'Writer B.\n' > "$WORK/b.txt"
+$AGNTZ board reply 11111111-1111-1111-1111-111111111111 --body-file "$WORK/a.txt" --role agent >/dev/null 2>&1
+$AGNTZ board reply 11111111-1111-1111-1111-111111111111 --name writer --body-file "$WORK/b.txt" --role agent >/dev/null 2>&1
+# Sync main, then confirm both writers' messages are in the shared topic.
+$AGNTZ board inbox --role agent >/dev/null 2>&1
+check "grep -rl 'Writer A' '$WORK/board/topics/hello' >/dev/null" "writer A's post survived"
+check "grep -rl 'Writer B' '$WORK/board/topics/hello' >/dev/null" "writer B's post survived"
+
+echo "[16] replying to a stale role warns"
+mkdir -p "$WORK/board/topics/ghost"
+cat > "$WORK/board/topics/ghost/20260820T000000Z-99999999-1111-1111-1111-111111111111.txt" <<'EOF'
+Message-ID: 99999999-1111-1111-1111-111111111111
+Sent-At: 2026-08-20T00:00:00Z
+From: ghost
+From-Agent: pi
+To: agent
+In-Reply-To: none
+
+Subject: Old
+
+Old.
+EOF
+(cd "$WORK/board" && git add -A && git commit -q -m ghost && git push -q origin master)
+STALE_OUT="$(set +e; $AGNTZ board reply 99999999-1111-1111-1111-111111111111 --body-file "$WORK/a.txt" 2>&1 || true)"
+check "echo '$STALE_OUT' | grep -qi 'stale'" "stale-role warning emitted"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

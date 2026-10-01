@@ -160,6 +160,10 @@ agntz board topics                                                # Topic metada
 agntz board inbox --role agent                                   # New relevant messages
 agntz board read <message-id>                                    # Full body + headers
 agntz board reply <message-id> --body-file reply.md              # Publish an immutable reply
+agntz board reply <message-id> --body-file reply.md --new-topic spin \
+                                                               # Open a cross-linked new topic
+agntz board reply <message-id> --body-file reply.md --idempotency-key op-1 \
+                                                               # Retry-safe (reuses Message-ID)
 agntz board status                                                # Local vs remote state
 ```
 

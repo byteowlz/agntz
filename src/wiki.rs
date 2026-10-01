@@ -294,12 +294,13 @@ fn split_front_matter(raw: &str) -> (Option<&str>, &str) {
 /// Fetch + fast-forward the wiki to the remote before a read/write so an agent
 /// never operates on a stale clone (docs' "search before creating" flow).
 fn sync_wiki(dir: &Path, repo: &RepoConfig) -> Result<()> {
-    if let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty())
+    if let Some(_) = repo.remote.as_deref().filter(|r| !r.is_empty())
         && gitx::has_remote(dir, "origin")
     {
         let branch = gitx::current_branch(dir).unwrap_or_else(|| "master".to_string());
-        gitx::sync_for_read(dir, "origin", &branch)
-            .map_err(|e| anyhow!("remote sync failed ({remote}): {e}"))?;
+        if let Some(w) = gitx::sync_for_read(dir, "origin", &branch)? {
+            eprintln!("sync note: {w}");
+        }
     }
     Ok(())
 }

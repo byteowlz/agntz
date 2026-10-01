@@ -203,20 +203,32 @@ pub fn fetch(dir: &Path, remote: &str) -> Result<()> {
 /// error, a missing remote branch, or incompatible/unrelated history — in those
 /// cases it warns and the caller reads the local tree as-is. This keeps a read
 /// usable even when the remote is unreachable or the histories diverged.
-pub fn sync_for_read(dir: &Path, remote: &str, branch: &str) -> Result<()> {
+/// Best-effort freshness for a read path: fetch the remote and fast-forward
+/// the local branch when possible. Never fails a read because of a network
+/// error, a missing remote branch, or incompatible/unrelated history.
+///
+/// Returns `Ok(None)` when the tree is freshly synced, or `Ok(Some(warning))`
+/// when it could **not** be synced (fetch/merge failed or the remote is
+/// missing/unreachable). The caller should surface that warning so an empty
+/// inbox is never mistaken for "nothing new" when the sync actually failed.
+/// A `sync_for_read` error is reserved for genuinely fatal local problems.
+pub fn sync_for_read(dir: &Path, remote: &str, branch: &str) -> Result<Option<String>> {
     if let Err(e) = run_need(dir, &["fetch", remote]) {
-        log::warn!("fetch from {remote} failed ({e:#}); reading local tree");
-        return Ok(());
+        let msg = format!("fetch from {remote} failed ({e:#}); reading local tree only");
+        log::warn!("{msg}");
+        return Ok(Some(msg));
     }
     let track = format!("{remote}/{branch}");
     if !run(dir, &["rev-parse", "--verify", &track]).ok {
-        // No remote branch to merge (fresh/empty remote).
-        return Ok(());
+        // No remote branch to merge (fresh/empty remote) — nothing to sync.
+        return Ok(None);
     }
     if let Err(e) = run_need(dir, &["merge", "--ff-only", &track]) {
-        log::warn!("fast-forward from {track} skipped ({e:#}); reading local tree");
+        let msg = format!("fast-forward from {track} skipped ({e:#}); reading local tree only");
+        log::warn!("{msg}");
+        return Ok(Some(msg));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Rebase the local branch onto `remote`/`branch`.

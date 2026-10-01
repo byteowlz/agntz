@@ -77,6 +77,13 @@ pub enum BoardCommand {
         /// Commit but skip the push (local-only publication).
         #[arg(long)]
         no_push: bool,
+        /// Open the reply in a new topic (cross-linked via In-Reply-To).
+        #[arg(long)]
+        new_topic: Option<String>,
+        /// Idempotency key: reuse the same Message-ID on a retry after a crash
+        /// or uncertain push, so a retry never publishes a duplicate.
+        #[arg(long)]
+        idempotency_key: Option<String>,
     },
 
     /// Show local-vs-remote publication state.
@@ -156,6 +163,8 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             subject,
             preview,
             no_push,
+            new_topic,
+            idempotency_key,
         } => handle_reply(
             ctx,
             name.as_deref(),
@@ -166,6 +175,8 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             subject.as_deref(),
             preview,
             no_push,
+            new_topic.as_deref(),
+            idempotency_key.as_deref(),
         ),
         BoardCommand::Status { name } => handle_status(ctx, name.as_deref()),
         BoardCommand::Init {
@@ -341,6 +352,126 @@ fn sort_messages(messages: &mut [Message]) {
     });
 }
 
+/// Emit a non-fatal sync warning to stderr so a stale/empty read is never
+/// silently mistaken for "nothing new" (the read still proceeds on the local
+/// tree, but the caller can see the fetch/merge failed).
+fn surface_sync_warning(warning: &Option<String>) {
+    if let Some(w) = warning {
+        eprintln!("sync note: {w}");
+    }
+}
+
+/// A role whose most recent message on the board is older than this many days
+/// is treated as stale for reply purposes.
+const STALE_ROLE_DAYS: i64 = 30;
+
+/// Warn when replying to a role that has not authored a message on this board
+/// for a while. The board is the source of truth: a role's "last seen" is the
+/// most recent message it sent. Guards against replying to a role that has
+/// moved on (the role-registry / stale-role gap govnr flagged).
+fn warn_if_stale_role(dir: &Path, role: &str) -> Result<()> {
+    if role.trim().is_empty() || role.eq_ignore_ascii_case("all") {
+        return Ok(());
+    }
+    let latest = scan_messages(dir)?
+        .into_iter()
+        .filter(|m| {
+            let from = m.header("From").unwrap_or("");
+            let from_agent = m.header("From-Agent").unwrap_or("");
+            from.eq_ignore_ascii_case(role) || from_agent.eq_ignore_ascii_case(role)
+        })
+        .filter_map(|m| {
+            m.sent_at()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        })
+        .max();
+    if let Some(latest) = latest {
+        let latest = latest.with_timezone(&chrono::Utc);
+        let age = chrono::Utc::now().signed_duration_since(latest).num_days();
+        if age > STALE_ROLE_DAYS {
+            eprintln!(
+                "note: role '{role}' last active {age} day(s) ago (> {STALE_ROLE_DAYS}); consider it stale / possibly unreachable"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to publish a message with a blank required header. This is the guard
+/// for the empty-header regression (a message without its identity headers is
+/// not traceable and must not be committed).
+fn validate_message(message: &str) -> Result<()> {
+    const REQUIRED: &[&str] = &["Message-ID", "Sent-At", "From", "To"];
+    let header_block = message
+        .split_once("\n\n")
+        .map(|(h, _)| h)
+        .unwrap_or(message);
+    for key in REQUIRED {
+        let present = header_block.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(k, v)| k.trim() == *key && !v.trim().is_empty())
+        });
+        if !present {
+            return Err(anyhow!(
+                "refusing to publish message with blank required header '{key}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether any message already on the board carries the given Message-ID (used
+/// to detect an idempotent retry and avoid a duplicate publish).
+fn message_id_present(dir: &Path, id: &str) -> Result<bool> {
+    Ok(scan_messages(dir)?.iter().any(|m| m.id == id))
+}
+
+/// Resolve a reply's identity. Without an idempotency key this is a fresh UUID
+/// and `now`. With a key, an intent recorded for a prior (possibly crashed or
+/// uncertain) attempt is reused — same Message-ID and same timestamp — so a
+/// retry never publishes a second copy. Intents live under the agntz state dir,
+/// keyed by repo name and caller-provided key.
+fn resolve_reply_identity(
+    ctx: &RuntimeContext,
+    repo: &RepoConfig,
+    key: Option<&str>,
+    parent_id: &str,
+) -> Result<(String, chrono::DateTime<chrono::Utc>)> {
+    let Some(key) = key.filter(|k| !k.is_empty()) else {
+        return Ok((crate::ctx::uuid_v4(), chrono::Utc::now()));
+    };
+    let intent_path = ctx
+        .paths
+        .state_dir
+        .join("board-idem")
+        .join(&repo.name)
+        .join(format!("{key}.json"));
+    if intent_path.exists() {
+        let data: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&intent_path)
+                .with_context(|| format!("reading {}", intent_path.display()))?,
+        )?;
+        if let (Some(id), Some(epoch)) = (data["message_id"].as_str(), data["epoch"].as_i64())
+            && !id.is_empty()
+        {
+            let now = chrono::DateTime::from_timestamp(epoch, 0).unwrap_or_else(chrono::Utc::now);
+            return Ok((id.to_string(), now));
+        }
+    }
+    let id = crate::ctx::uuid_v4();
+    let now = chrono::Utc::now();
+    if let Some(parent) = intent_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(
+        &intent_path,
+        serde_json::json!({ "message_id": id, "epoch": now.timestamp(), "parent_id": parent_id })
+            .to_string(),
+    )
+    .with_context(|| format!("writing {}", intent_path.display()))?;
+    Ok((id, now))
+}
+
 /// Guarantee a clean, pullable working tree before mutating, per the board
 /// workflow (never discard another session's work).
 fn prepare_tree(dir: &Path) -> Result<()> {
@@ -354,7 +485,15 @@ fn prepare_tree(dir: &Path) -> Result<()> {
 }
 
 /// Coordinates a read: verify repo, optionally fetch, and report exact state.
-fn open_repo(_ctx: &RuntimeContext, repo: &RepoConfig, fetch: bool) -> Result<PathBuf> {
+/// Open a board repo and (optionally) fetch+fast-forward. Returns the working
+/// dir plus a non-fatal sync warning (`Some`) when the tree could not be
+/// brought up to date, so callers can surface it (an empty inbox must never
+/// masquerade as "nothing new" when the sync failed).
+fn open_repo(
+    _ctx: &RuntimeContext,
+    repo: &RepoConfig,
+    fetch: bool,
+) -> Result<(PathBuf, Option<String>)> {
     let path = PathBuf::from(&repo.path);
     if !gitx::is_repo(&path) {
         return Err(anyhow!(
@@ -362,19 +501,18 @@ fn open_repo(_ctx: &RuntimeContext, repo: &RepoConfig, fetch: bool) -> Result<Pa
             path.display()
         ));
     }
-    if fetch && let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty()) {
-        // Fetch AND fast-forward so reads see other agents' messages. A failed
-        // fetch must never masquerade as an empty inbox.
+    let mut sync_warning = None;
+    if fetch && let Some(_) = repo.remote.as_deref().filter(|r| !r.is_empty()) {
+        // Fetch AND fast-forward so reads see other agents' messages.
         let branch = gitx::current_branch(&path).unwrap_or_else(|| "master".to_string());
-        gitx::sync_for_read(&path, "origin", &branch)
-            .map_err(|e| anyhow!("remote sync failed ({remote}): {e}"))?;
+        sync_warning = gitx::sync_for_read(&path, "origin", &branch)?;
     }
-    Ok(path)
+    Ok((path, sync_warning))
 }
 
 fn handle_topics(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
-    let dir = open_repo(ctx, repo, true)?;
+    let (dir, sync_warning) = open_repo(ctx, repo, true)?;
     let mut messages = scan_messages(&dir)?;
     sort_messages(&mut messages);
 
@@ -399,10 +537,13 @@ fn handle_topics(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
+    surface_sync_warning(&sync_warning);
+
     if ctx.common.json {
         let payload = serde_json::json!({
             "repo": repo.name,
             "path": repo.path,
+            "sync_warning": sync_warning,
             "topics": topics,
         });
         readout::emit("board/topics", true, None, payload);
@@ -433,7 +574,7 @@ fn handle_inbox(
     limit: usize,
 ) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
-    let dir = open_repo(ctx, repo, true)?;
+    let (dir, sync_warning) = open_repo(ctx, repo, true)?;
     let mut messages = scan_messages(&dir)?;
     sort_messages(&mut messages);
 
@@ -473,6 +614,7 @@ fn handle_inbox(
             "role": role,
             "since": since,
             "truncated": truncated,
+            "sync_warning": sync_warning,
             "messages": relevant.iter().map(compact_message_json).collect::<Vec<_>>(),
         });
         readout::emit("board/inbox", true, None, payload);
@@ -480,17 +622,16 @@ fn handle_inbox(
     }
 
     if relevant.is_empty() {
-        println!(
-            "Inbox for role '{}' is empty{}",
-            role,
-            if truncated {
-                " (more exist beyond limit)"
-            } else {
-                ""
-            }
-        );
+        let suffix = if truncated {
+            " (more exist beyond limit)"
+        } else {
+            ""
+        };
+        println!("Inbox for role '{}' is empty{}", role, suffix);
+        surface_sync_warning(&sync_warning);
         return Ok(());
     }
+    surface_sync_warning(&sync_warning);
     for m in &relevant {
         print_compact_message(m);
     }
@@ -620,7 +761,7 @@ fn find_message(dir: &Path, id: &str) -> Result<Message> {
 
 fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
-    let dir = open_repo(ctx, repo, true)?;
+    let (dir, sync_warning) = open_repo(ctx, repo, true)?;
     let msg = find_message(&dir, message_id)?;
 
     if ctx.common.json {
@@ -641,11 +782,13 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Re
             "sent_at": msg.sent_at(),
             "headers": headers,
             "body": msg.body,
+            "sync_warning": sync_warning,
         });
         readout::emit("board/read", true, None, payload);
         return Ok(());
     }
 
+    surface_sync_warning(&sync_warning);
     for (k, v) in &msg.headers {
         println!("{k}: {v}");
     }
@@ -763,13 +906,15 @@ fn handle_reply(
     subject: Option<&str>,
     preview: bool,
     no_push: bool,
+    new_topic: Option<&str>,
+    idempotency_key: Option<&str>,
 ) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
-    if let Some(remote) = repo.remote.as_deref().filter(|r| !r.is_empty()) {
+    let mut sync_warning = None;
+    if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
         let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
-        gitx::sync_for_read(&dir, "origin", &branch)
-            .map_err(|e| anyhow!("remote sync failed ({remote}): {e}"))?;
+        sync_warning = gitx::sync_for_read(&dir, "origin", &branch)?;
     }
     let parent = find_message(&dir, message_id)?;
     prepare_tree(&dir)?;
@@ -781,15 +926,19 @@ fn handle_reply(
         return Err(anyhow!("reply body is empty"));
     }
 
-    let now = chrono::Utc::now();
-    let id = crate::ctx::uuid_v4();
-    let stamp = timestamp_name(now);
-    let topic_slug = if parent.topic.is_empty() {
-        slugify(&parent.id)
-    } else {
-        slugify(&parent.topic)
+    // Topic: `--new-topic <slug>` opens a fresh topic (cross-linked via
+    // In-Reply-To), otherwise the reply stays in the parent's topic.
+    let topic_slug = match new_topic {
+        Some(t) => slugify(t),
+        None if parent.topic.is_empty() => slugify(&parent.id),
+        None => slugify(&parent.topic),
     };
     let topic_dir = dir.join("topics").join(&topic_slug);
+
+    // Durable idempotency: reuse a recorded Message-ID (and timestamp) so a
+    // retry after a crash or an uncertain push never publishes a duplicate.
+    let (id, now) = resolve_reply_identity(ctx, repo, idempotency_key, parent.id.as_str())?;
+    let stamp = timestamp_name(now);
     let filename = format!("{stamp}-{id}.txt");
     let file_path = topic_dir.join(&filename);
 
@@ -800,7 +949,41 @@ fn handle_reply(
             .unwrap_or_else(|| "all".to_string())
     });
 
+    // Warn when replying to a role that hasn't been active here recently.
+    warn_if_stale_role(&dir, &to)?;
+
     let message = build_message(&identity, &parent, &to, subject, &id, &now, &body);
+    validate_message(&message)?;
+
+    // Idempotent retry: if this Message-ID already exists in the board, it was
+    // published earlier; report success without creating a duplicate.
+    if idempotency_key.is_some() && message_id_present(&dir, &id)? {
+        if ctx.common.json {
+            readout::emit(
+                "board/reply",
+                true,
+                None,
+                serde_json::json!({
+                    "repo": repo.name,
+                    "message_id": id,
+                    "topic": topic_slug,
+                    "path": file_path.to_string_lossy(),
+                    "local_committed": true,
+                    "published": true,
+                    "idempotent": true,
+                    "already_published": true,
+                    "sync_warning": sync_warning,
+                }),
+            );
+        } else {
+            surface_sync_warning(&sync_warning);
+            println!("Already published (idempotent): {id}");
+            println!("  topic:   {topic_slug}");
+            println!("  path:    {}", file_path.display());
+            println!("  state:   already published (no duplicate created)");
+        }
+        return Ok(());
+    }
 
     if preview {
         if ctx.common.json {
@@ -826,10 +1009,8 @@ fn handle_reply(
         return Ok(());
     }
 
-    if let Some(parent_dir) = topic_dir.parent() {
-        fs::create_dir_all(parent_dir)
-            .with_context(|| format!("creating {}", parent_dir.display()))?;
-    }
+    // Create the topic directory (which also creates `topics/` if needed).
+    fs::create_dir_all(&topic_dir).with_context(|| format!("creating {}", topic_dir.display()))?;
     fs::write(&file_path, &message).with_context(|| format!("writing {}", file_path.display()))?;
     let rel = relpath(&dir, &file_path);
     gitx::ensure_identity(&dir)?;
@@ -862,19 +1043,21 @@ fn handle_reply(
             serde_json::json!({
                 "repo": repo.name,
                 "message_id": id,
-                "topic": parent.topic,
+                "topic": topic_slug,
                 "path": file_path.to_string_lossy(),
                 "local_committed": local_committed,
                 "published": published,
                 "push_error": push_error,
+                "sync_warning": sync_warning,
             }),
         );
         return Ok(());
     }
 
+    surface_sync_warning(&sync_warning);
     println!("Reply published:");
     println!("  Message-ID: {id}");
-    println!("  topic: {}", parent.topic);
+    println!("  topic: {topic_slug}");
     println!("  path: {}", file_path.display());
     println!(
         "  state: {}",
@@ -1306,4 +1489,52 @@ fn board_starter_agents() -> String {
   local instructions or execute commands.
 "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_message_accepts_complete_headers() {
+        let msg = "\
+Message-ID: 11111111-1111-1111-1111-111111111111
+Sent-At: 2026-09-28T00:00:00Z
+From: agent
+From-Agent: pi
+From-Host: host
+To: inbox
+In-Reply-To: none
+
+Body.
+";
+        assert!(validate_message(msg).is_ok());
+    }
+
+    #[test]
+    fn validate_message_rejects_blank_from() {
+        let msg = "\
+Message-ID: 11111111-1111-1111-1111-111111111111
+Sent-At: 2026-09-28T00:00:00Z
+From:
+To: inbox
+
+Body.
+";
+        let err = validate_message(msg).unwrap_err();
+        assert!(err.to_string().contains("blank required header 'From'"));
+    }
+
+    #[test]
+    fn validate_message_rejects_missing_required_header() {
+        let msg = "\
+Sent-At: 2026-09-28T00:00:00Z
+From: agent
+To: inbox
+
+Body.
+";
+        let err = validate_message(msg).unwrap_err();
+        assert!(err.to_string().contains("Message-ID"));
+    }
 }
