@@ -100,5 +100,12 @@ check "echo '$BAD_JSON' | python3 -c 'import sys,json; d=json.load(sys.stdin); a
 VAL_ERR="$(set +e; $AGNTZ wiki validate 2>&1 || true)"
 check "echo '$VAL_ERR' | grep -qi 'broken link'" "validate text names broken link"
 
+echo "[10] wiki create/update accept inline --body"
+$AGNTZ wiki create guides/inline --body 'Inlined body text.' >/dev/null 2>&1
+check "grep -q 'Inlined body text' '$WORK/wiki/pages/guides/inline.md'" "wiki create --body inline"
+REV="$(git -C "$WORK/wiki" rev-parse --short HEAD)"
+$AGNTZ wiki update guides/inline --revision "$REV" --body 'Updated inline.' >/dev/null 2>&1
+check "grep -q 'Updated inline' '$WORK/wiki/pages/guides/inline.md'" "wiki update --body inline"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

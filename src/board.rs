@@ -59,6 +59,9 @@ pub enum BoardCommand {
         /// Path to the body file, or `-` for stdin.
         #[arg(long, default_value = "-")]
         body_file: String,
+        /// Inline message body (alternative to --body-file).
+        #[arg(long)]
+        body: Option<String>,
         /// Select a named board repository.
         #[arg(long)]
         name: Option<String>,
@@ -174,6 +177,7 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
         BoardCommand::Reply {
             message_id,
             body_file,
+            body,
             name,
             role,
             to,
@@ -187,6 +191,7 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             name.as_deref(),
             &message_id,
             &body_file,
+            body.as_deref(),
             role.as_deref(),
             to.as_deref(),
             subject.as_deref(),
@@ -903,6 +908,26 @@ fn role_matches(msg: &Message, role_lower: &str) -> bool {
         .any(|t| t.eq_ignore_ascii_case(role_lower))
 }
 
+/// A human-facing title: the `Subject` when present, else the first non-empty
+/// body line, else an explicit "(no subject)" placeholder. Never blank, so an
+/// inbox/read listing stays readable even for unlabeled messages.
+fn message_title(m: &Message) -> String {
+    if let Some(s) = m.subject().map(str::trim).filter(|s| !s.is_empty()) {
+        return s.to_string();
+    }
+    let first = m
+        .body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        "(no subject)".to_string()
+    } else {
+        first.chars().take(60).collect()
+    }
+}
+
 fn compact_message_json(m: &Message) -> serde_json::Value {
     serde_json::json!({
         "message_id": m.id,
@@ -913,6 +938,7 @@ fn compact_message_json(m: &Message) -> serde_json::Value {
         "from_host": m.header("From-Host"),
         "to": m.header("To"),
         "subject": m.subject(),
+        "title": message_title(m),
         "excerpt": excerpt(&m.body),
         "path": m.path.to_string_lossy(),
     })
@@ -920,11 +946,11 @@ fn compact_message_json(m: &Message) -> serde_json::Value {
 
 fn print_compact_message(m: &Message) {
     println!(
-        "{topic}  {id}  {from}  {subject}  - {excerpt}",
+        "{topic}  {id}  {from}  {title}  - {excerpt}",
         topic = m.topic,
         id = short_id(&m.id),
         from = m.header("From").unwrap_or("?"),
-        subject = m.subject().unwrap_or(""),
+        title = message_title(m),
         excerpt = excerpt(&m.body),
     );
     println!(
@@ -937,14 +963,7 @@ fn print_compact_message(m: &Message) {
 #[must_use]
 fn excerpt(body: &str) -> String {
     let first = body.lines().next().unwrap_or("").trim().to_string();
-    if first.len() > 80 {
-        let mut s = first;
-        s.truncate(77);
-        s.push_str("...");
-        s
-    } else {
-        first
-    }
+    agntz::clip_to_words(&first, 80)
 }
 
 #[must_use]
@@ -969,9 +988,17 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Re
     let (dir, sync_warning) = open_repo(ctx, repo, true)?;
     let msg = find_message(&dir, message_id)?;
 
+    // Deterministic ordering of headers (message files are parsed into a HashMap).
+    let mut header_items: Vec<(String, String)> = msg
+        .headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    header_items.sort();
+
     if ctx.common.json {
         let mut headers = serde_json::Map::new();
-        for (k, v) in &msg.headers {
+        for (k, v) in &header_items {
             headers.insert(k.clone(), serde_json::json!(v));
         }
         let payload = serde_json::json!({
@@ -994,7 +1021,7 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Re
     }
 
     surface_sync_warning(&sync_warning);
-    for (k, v) in &msg.headers {
+    for (k, v) in &header_items {
         println!("{k}: {v}");
     }
     println!();
@@ -1106,6 +1133,7 @@ fn handle_reply(
     name: Option<&str>,
     message_id: &str,
     body_file: &str,
+    body_override: Option<&str>,
     role_override: Option<&str>,
     to_override: Option<&str>,
     subject: Option<&str>,
@@ -1126,7 +1154,10 @@ fn handle_reply(
     gitx::ensure_git()?;
 
     let identity = detect_identity(role_override, repo.role.as_deref());
-    let body = read_body(body_file)?;
+    let body = match body_override {
+        Some(b) => b.to_string(),
+        None => read_body(body_file)?,
+    };
     if body.trim().is_empty() {
         return Err(anyhow!("reply body is empty"));
     }

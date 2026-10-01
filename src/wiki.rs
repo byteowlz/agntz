@@ -59,6 +59,9 @@ pub enum WikiCommand {
         /// Body file path, or `-` for stdin.
         #[arg(long, default_value = "-")]
         body_file: String,
+        /// Inline page body (alternative to --body-file).
+        #[arg(long)]
+        body: Option<String>,
         /// Optional status (proposed/accepted/superseded).
         #[arg(long)]
         status: Option<String>,
@@ -86,6 +89,9 @@ pub enum WikiCommand {
         /// Body file path, or `-` for stdin.
         #[arg(long, default_value = "-")]
         body_file: String,
+        /// Inline page body (alternative to --body-file).
+        #[arg(long)]
+        body: Option<String>,
         /// Select a named wiki repository.
         #[arg(long)]
         name: Option<String>,
@@ -166,6 +172,7 @@ pub fn handle(command: WikiCommand, ctx: &RuntimeContext) -> Result<()> {
             page,
             title,
             body_file,
+            body,
             status,
             kind,
             name,
@@ -177,6 +184,7 @@ pub fn handle(command: WikiCommand, ctx: &RuntimeContext) -> Result<()> {
             &page,
             title.as_deref(),
             &body_file,
+            body.as_deref(),
             status.as_deref(),
             kind.as_deref(),
             preview,
@@ -186,6 +194,7 @@ pub fn handle(command: WikiCommand, ctx: &RuntimeContext) -> Result<()> {
             page,
             revision,
             body_file,
+            body,
             name,
             preview,
             no_push,
@@ -195,6 +204,7 @@ pub fn handle(command: WikiCommand, ctx: &RuntimeContext) -> Result<()> {
             &page,
             &revision,
             &body_file,
+            body.as_deref(),
             preview,
             no_push,
         ),
@@ -461,8 +471,14 @@ fn excerpt_of(body: &str, query: &str) -> String {
     let idx = lower.find(&q).unwrap_or(0);
     let start = idx.saturating_sub(20);
     let end = (idx + q.len() + 40).min(body.len());
-    let mut s = if start > 0 { "..." } else { "" }.to_string();
-    s.push_str(body.get(start..end).unwrap_or(""));
+    // Snap to word boundaries so the excerpt never begins or ends mid-word.
+    let (start, end) = agntz::snap_to_word_bounds(body, start, end);
+    let text = body.get(start..end).unwrap_or("");
+    let mut s = String::new();
+    if start > 0 {
+        s.push_str("...");
+    }
+    s.push_str(text);
     if end < body.len() {
         s.push_str("...");
     }
@@ -511,6 +527,7 @@ fn handle_create(
     page_id: &str,
     title: Option<&str>,
     body_file: &str,
+    body_override: Option<&str>,
     status: Option<&str>,
     kind: Option<&str>,
     preview: bool,
@@ -530,7 +547,10 @@ fn handle_create(
     let title = title
         .map(str::to_string)
         .unwrap_or_else(|| page_id.rsplit('/').next().unwrap_or(page_id).to_string());
-    let body = read_body(body_file)?;
+    let body = match body_override {
+        Some(b) => b.to_string(),
+        None => read_body(body_file)?,
+    };
     let author = crate::ctx::provenance();
     let content = render_from_front(&build_front(&title, status, kind, &author), &body);
 
@@ -571,6 +591,7 @@ fn handle_update(
     page_id: &str,
     revision: &str,
     body_file: &str,
+    body_override: Option<&str>,
     preview: bool,
     no_push: bool,
 ) -> Result<()> {
@@ -594,7 +615,10 @@ fn handle_update(
     }
 
     let page = parse_page(&page_path, page_id, page_id)?;
-    let body = read_body(body_file)?;
+    let body = match body_override {
+        Some(b) => b.to_string(),
+        None => read_body(body_file)?,
+    };
 
     // No-op: identical body should not create an empty commit.
     let new_body = body.trim_start();

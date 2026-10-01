@@ -53,49 +53,69 @@ struct Cli {
 #[derive(Debug, Clone, Args)]
 pub struct CommonOpts {
     /// Override the config file path.
-    #[arg(long, value_name = "PATH", global = true)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        global = true,
+        help_heading = "Global options"
+    )]
     pub config: Option<PathBuf>,
     /// Reduce output to only errors.
-    #[arg(short, long, action = clap::ArgAction::SetTrue, global = true)]
+    #[arg(short, long, action = clap::ArgAction::SetTrue, global = true, help_heading = "Global options")]
     pub quiet: bool,
     /// Increase logging verbosity (stackable).
-    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true, help_heading = "Global options")]
     pub verbose: u8,
     /// Enable debug logging (equivalent to -vv).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub debug: bool,
     /// Enable trace logging (overrides other levels).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub trace: bool,
     /// Output machine-readable JSON.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub json: bool,
     /// Disable ANSI colors in output.
     #[arg(long = "no-color", global = true, conflicts_with = "color")]
     pub no_color: bool,
     /// Control color output (auto, always, never).
-    #[arg(long, value_enum, default_value_t = ColorOption::Auto, global = true)]
+    #[arg(long, value_enum, default_value_t = ColorOption::Auto, global = true, help_heading = "Global options")]
     pub color: ColorOption,
     /// Do not change anything on disk.
-    #[arg(long = "dry-run", global = true)]
+    #[arg(long = "dry-run", global = true, help_heading = "Global options")]
     pub dry_run: bool,
     /// Assume "yes" for interactive prompts.
-    #[arg(short = 'y', long = "yes", global = true)]
+    #[arg(
+        short = 'y',
+        long = "yes",
+        global = true,
+        help_heading = "Global options"
+    )]
     pub assume_yes: bool,
     /// Never prompt for input; fail if confirmation would be required.
-    #[arg(long = "no-input", global = true)]
+    #[arg(long = "no-input", global = true, help_heading = "Global options")]
     pub no_input: bool,
     /// Maximum seconds to allow an operation to run.
-    #[arg(long = "timeout", value_name = "SECONDS", global = true)]
+    #[arg(
+        long = "timeout",
+        value_name = "SECONDS",
+        global = true,
+        help_heading = "Global options"
+    )]
     pub timeout: Option<u64>,
     /// Override the degree of parallelism.
-    #[arg(long = "parallel", value_name = "N", global = true)]
+    #[arg(
+        long = "parallel",
+        value_name = "N",
+        global = true,
+        help_heading = "Global options"
+    )]
     pub parallel: Option<usize>,
     /// Disable progress indicators.
-    #[arg(long = "no-progress", global = true)]
+    #[arg(long = "no-progress", global = true, help_heading = "Global options")]
     pub no_progress: bool,
     /// Emit additional diagnostics for troubleshooting.
-    #[arg(long = "diagnostics", global = true)]
+    #[arg(long = "diagnostics", global = true, help_heading = "Global options")]
     pub diagnostics: bool,
 }
 

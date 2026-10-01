@@ -20,6 +20,43 @@ pub const SCHEMA_FILENAME: &str = "config.schema.json";
 /// Generated config filename.
 pub const CONFIG_FILENAME: &str = "config.toml";
 
+/// Clip `text` to at most `max` characters, snapping the cut back to the
+/// previous word boundary so no word is split in the middle. Appends `...` when
+/// clipped. Used for bounded excerpts/titles.
+pub fn clip_to_words(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut clipped: String = text.chars().take(max).collect();
+    if let Some(pos) = clipped.rfind(char::is_whitespace) {
+        clipped.truncate(pos);
+    }
+    format!("{}...", clipped.trim_end())
+}
+
+/// Snap a byte range `[start, end)` inside `text` outward to word boundaries so
+/// an excerpt never begins or ends mid-word. Safe on any (possibly non-boundary)
+/// `start`/`end`.
+pub fn snap_to_word_bounds(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let start = if start > 0 {
+        text.get(..start)
+            .and_then(|p| p.rfind(char::is_whitespace))
+            .map(|p| p + 1)
+            .unwrap_or(start)
+    } else {
+        0
+    };
+    let end = if end < text.len() {
+        text.get(end..)
+            .and_then(|t| t.find(char::is_whitespace))
+            .map(|p| end + p)
+            .unwrap_or(text.len())
+    } else {
+        text.len()
+    };
+    (start, end.max(start))
+}
+
 /// Generate the JSON schema for `config::AppConfig`.
 ///
 /// # Errors

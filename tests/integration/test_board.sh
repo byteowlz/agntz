@@ -211,5 +211,15 @@ ACKFILE="$(grep -rl 'Ack: read' "$WORK/curb/topics/t" | head -1)"
 check "test -n '$ACKFILE'" "--publish created an ack message"
 check "grep -q 'does not imply agreement' '$ACKFILE'" "ack text is receipt-only (no agreement)"
 
+# Inline --body and title defaulting on a fresh local board.
+echo "[20] inline --body and title defaulting"
+$AGNTZ board init t2 "$WORK/t2b" --role agent >/dev/null
+mkdir -p "$WORK/t2b/topics/t"
+printf 'Message-ID: eeeeeeee-5555-5555-5555-555555555555\nSent-At: 2026-09-28T00:00:00Z\nFrom: other-agent\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nTitle from this body line.\n' > "$WORK/t2b/topics/t/20260928T000000Z-eeeeeeee-5555-5555-5555-555555555555.txt"
+(cd "$WORK/t2b" && git add -A && git commit -q -m m)
+check "$AGNTZ board inbox --role agent --name t2 --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin)[\"result\"][\"messages\"][0]; assert d[\"title\"]==\"Title from this body line.\" and d[\"subject\"] is None'" "title defaults to body line in --json"
+$AGNTZ board reply eeeeeeee-5555-5555-5555-555555555555 --name t2 --body 'Inline reply.' >/dev/null 2>&1
+check "$AGNTZ board inbox --role all --name t2 --json 2>/dev/null | python3 -c 'import sys,json; ms=json.load(sys.stdin)[\"result\"][\"messages\"]; assert any(\"Inline reply\" in m[\"title\"] for m in ms)'" "reply --body inline (no file)"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1
