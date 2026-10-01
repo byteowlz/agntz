@@ -93,6 +93,23 @@ pub enum BoardCommand {
         name: Option<String>,
     },
 
+    /// Advance the local read cursor (per-session). Optionally publish an
+    /// explicit acknowledgment message (a read receipt) that records receipt
+    /// only — it does NOT imply agreement, completion, or consent.
+    Ack {
+        /// Message-ID being acknowledged as read.
+        message_id: String,
+        /// Select a named board repository.
+        #[arg(long)]
+        name: Option<String>,
+        /// Publish a shared acknowledgment message to the board.
+        #[arg(long)]
+        publish: bool,
+        /// Override the sender role for the published ack.
+        #[arg(long)]
+        role: Option<String>,
+    },
+
     /// Bootstrap a fresh local board repository.
     Init {
         /// Name to register the repository under.
@@ -179,6 +196,12 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             idempotency_key.as_deref(),
         ),
         BoardCommand::Status { name } => handle_status(ctx, name.as_deref()),
+        BoardCommand::Ack {
+            message_id,
+            name,
+            publish,
+            role,
+        } => handle_ack(ctx, name.as_deref(), &message_id, publish, role.as_deref()),
         BoardCommand::Init {
             name,
             path,
@@ -364,6 +387,112 @@ fn surface_sync_warning(warning: &Option<String>) {
 /// A role whose most recent message on the board is older than this many days
 /// is treated as stale for reply purposes.
 const STALE_ROLE_DAYS: i64 = 30;
+
+/// A per-session read cursor: how far this session/role has processed the
+/// board. Stored in the agntz **state dir** (machine-local, never in the shared
+/// board repo) so each agent keeps its own read progress. The cursor stores the
+/// last-acknowledged message id *and* the commit that added it, so a read from
+/// the cursor tolerates late/skewed messages (a message absent at that commit
+/// is treated as new even if it sorts before the cursor).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ReadCursor {
+    session_id: String,
+    role: String,
+    #[serde(default)]
+    last_acked_message_id: Option<String>,
+    #[serde(default)]
+    last_acked_commit: Option<String>,
+    updated_at: String,
+}
+
+fn cursor_dir(ctx: &RuntimeContext, repo: &RepoConfig) -> PathBuf {
+    ctx.paths.state_dir.join("board-cur").join(&repo.name)
+}
+
+fn session_cursor_path(ctx: &RuntimeContext, repo: &RepoConfig, session_id: &str) -> PathBuf {
+    cursor_dir(ctx, repo).join(format!("session-{session_id}.json"))
+}
+
+fn role_cursor_path(ctx: &RuntimeContext, repo: &RepoConfig, role: &str) -> PathBuf {
+    cursor_dir(ctx, repo).join(format!("role-{role}.json"))
+}
+
+fn load_cursor(path: &Path) -> Option<ReadCursor> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+fn save_cursor(path: &Path, c: &ReadCursor) -> Result<()> {
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p).with_context(|| format!("creating {}", p.display()))?;
+    }
+    fs::write(path, serde_json::to_string_pretty(c)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// The effective cursor: prefer the per-session file; fall back to the per-role
+/// file when the session was replaced (so no unread messages are dropped on
+/// session churn); otherwise start fresh.
+fn current_cursor(
+    ctx: &RuntimeContext,
+    repo: &RepoConfig,
+    session_id: &str,
+    role: &str,
+) -> Result<ReadCursor> {
+    if let Some(c) = load_cursor(&session_cursor_path(ctx, repo, session_id)) {
+        return Ok(c);
+    }
+    if let Some(mut c) = load_cursor(&role_cursor_path(ctx, repo, role)) {
+        c.session_id = session_id.to_string();
+        return Ok(c);
+    }
+    Ok(ReadCursor {
+        session_id: session_id.to_string(),
+        role: role.to_string(),
+        last_acked_message_id: None,
+        last_acked_commit: None,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Advance and persist both the per-session and per-role cursors to the given
+/// message/commit, recording receipt (explicit ack or a non-truncated read).
+fn save_ack(
+    ctx: &RuntimeContext,
+    repo: &RepoConfig,
+    session_id: &str,
+    role: &str,
+    message_id: &str,
+    commit: Option<&str>,
+) -> Result<()> {
+    let c = ReadCursor {
+        session_id: session_id.to_string(),
+        role: role.to_string(),
+        last_acked_message_id: Some(message_id.to_string()),
+        last_acked_commit: commit.map(str::to_string),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    save_cursor(&session_cursor_path(ctx, repo, session_id), &c)?;
+    save_cursor(&role_cursor_path(ctx, repo, role), &c)
+}
+
+/// The commit that introduced a message file (or `None` if it can't be found).
+fn message_commit(dir: &Path, msg: &Message) -> Option<String> {
+    let rel = msg
+        .path
+        .strip_prefix(dir)
+        .unwrap_or(&msg.path)
+        .to_string_lossy()
+        .to_string();
+    let out = gitx::run(dir, &["log", "-1", "--format=%H", "--", &rel]);
+    let s = out.out().to_string();
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
 
 /// Warn when replying to a role that has not authored a message on this board
 /// for a while. The board is the source of truth: a role's "last seen" is the
@@ -578,8 +707,33 @@ fn handle_inbox(
     let mut messages = scan_messages(&dir)?;
     sort_messages(&mut messages);
 
-    // Find the cursor position: either a specific message-id or a commit.
-    let cutoff_pos = resolve_cursor(&dir, &messages, since)?;
+    // Per-session/role read cursor. An explicit `--since` overrides it; otherwise
+    // the stored cursor is the default starting point (incremental inbox).
+    let session_id = crate::ctx::provenance().session;
+    let cursor = current_cursor(ctx, repo, &session_id, role)?;
+    let auto = since.is_none();
+    let effective_since: Option<String> = if auto {
+        cursor
+            .last_acked_commit
+            .clone()
+            .or_else(|| cursor.last_acked_message_id.clone())
+    } else {
+        since.map(str::to_string)
+    };
+
+    // Find the cursor position. An explicit `--since` uses the single-value
+    // resolver; otherwise the stored cursor (acked id + commit) is used so we
+    // neither over-ack siblings in a commit nor skip late/skewed arrivals.
+    let cutoff_pos = if auto {
+        resolve_cursor_for_read(
+            &dir,
+            &messages,
+            cursor.last_acked_message_id.as_deref(),
+            cursor.last_acked_commit.as_deref(),
+        )?
+    } else {
+        resolve_cursor(&dir, &messages, since)?
+    };
 
     let role_lower = role.to_ascii_lowercase();
     let mut relevant = Vec::new();
@@ -607,12 +761,29 @@ fn handle_inbox(
         .count()
         > relevant.len();
 
+    // Auto-advance the read cursor after a complete (non-truncated) read, and
+    // only when not using an explicit `--since` (manual control). Bounded output
+    // is intentionally NOT marked read, so nothing is skipped.
+    if auto && !truncated {
+        let head = gitx::run(&dir, &["rev-parse", "HEAD"]).out().to_string();
+        let head = head.trim();
+        let last_id = messages.last().map(|m| m.id.as_str()).unwrap_or("");
+        save_ack(
+            ctx,
+            repo,
+            &session_id,
+            role,
+            last_id,
+            if head.is_empty() { None } else { Some(head) },
+        )?;
+    }
+
     if ctx.common.json {
         let payload = serde_json::json!({
             "repo": repo.name,
             "path": repo.path,
             "role": role,
-            "since": since,
+            "since": effective_since,
             "truncated": truncated,
             "sync_warning": sync_warning,
             "messages": relevant.iter().map(compact_message_json).collect::<Vec<_>>(),
@@ -639,6 +810,40 @@ fn handle_inbox(
         eprintln!("note: more relevant messages exist; raise --limit or use --since to continue");
     }
     Ok(())
+}
+
+/// Resolve a stored read cursor (last-acked message id + the commit that added
+/// it) to the set of message indices still to show. A message is "new" if it
+/// sorts strictly after the acked message, **or** its file was absent at the
+/// acked commit (a late/skewed arrival committed after the cursor even if it
+/// sorts before it). This never over-acks siblings that share a commit, and
+/// never skips a message that arrived late.
+fn resolve_cursor_for_read(
+    dir: &Path,
+    messages: &[Message],
+    acked_id: Option<&str>,
+    acked_commit: Option<&str>,
+) -> Result<Option<Vec<usize>>> {
+    let Some(id) = acked_id else {
+        return Ok(None);
+    };
+    let pos = messages.iter().position(|m| m.id == id);
+    let mut keep = Vec::new();
+    for (idx, m) in messages.iter().enumerate() {
+        let after = pos.is_some_and(|p| idx > p);
+        let absent_at_commit = acked_commit.is_some_and(|c| {
+            let rel = m
+                .path
+                .strip_prefix(dir)
+                .unwrap_or(&m.path)
+                .to_string_lossy();
+            !gitx::run(dir, &["cat-file", "-e", &format!("{c}:{rel}")]).ok
+        });
+        if after || absent_at_commit {
+            keep.push(idx);
+        }
+    }
+    Ok(Some(keep))
 }
 
 /// Resolve a `--since` value (a message-id or a commit) to a cursor index.
@@ -1074,6 +1279,150 @@ fn handle_reply(
     if let Some(err) = push_error {
         eprintln!("push failed: {err}");
         eprintln!("recover by pushing manually: git push origin");
+    }
+    Ok(())
+}
+
+/// Build an explicit acknowledgment message. It records receipt only and is
+/// worded so it cannot be read as agreement, completion, or consent.
+fn build_ack_message(
+    identity: &Identity,
+    parent: &Message,
+    id: &str,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Message-ID: {id}\n"));
+    out.push_str(&format!("Sent-At: {}\n", now.format("%Y-%m-%dT%H:%M:%SZ")));
+    out.push_str(&format!("From: {}\n", identity.role));
+    out.push_str(&format!("From-Agent: {}\n", identity.agent));
+    out.push_str(&format!("From-Host: {}\n", identity.host));
+    out.push_str(&format!("From-Session-ID: {}\n", identity.session));
+    if let Some(m) = identity.machine.as_deref() {
+        out.push_str(&format!("From-Machine: {m}\n"));
+    }
+    if let Some(w) = identity.workspace.as_deref() {
+        out.push_str(&format!("From-Workspace: {w}\n"));
+    }
+    out.push_str(&format!("To: {}\n", parent.header("From").unwrap_or("all")));
+    out.push_str(&format!("In-Reply-To: {}\n", parent.id));
+    out.push_str("Ack: read\n");
+    out.push_str("Subject: acknowledgment\n\n");
+    out.push_str(
+        "Acknowledged as read. This is a read receipt only; it records receipt and \
+does not imply agreement, completion, or consent.\n",
+    );
+    out
+}
+
+/// Advance the local read cursor for a message (per-session + per-role). With
+/// `--publish` it also posts an explicit immutable acknowledgment message to the
+/// board (an opt-in read receipt that does not imply agreement).
+fn handle_ack(
+    ctx: &RuntimeContext,
+    name: Option<&str>,
+    message_id: &str,
+    publish: bool,
+    role_override: Option<&str>,
+) -> Result<()> {
+    let repo = resolve_repo(ctx, name)?;
+    let dir = PathBuf::from(&repo.path);
+    let mut sync_warning = None;
+    if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
+        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
+        sync_warning = gitx::sync_for_read(&dir, "origin", &branch)?;
+    }
+    let msg = find_message(&dir, message_id)?;
+    let identity = detect_identity(role_override, repo.role.as_deref());
+    let session_id = crate::ctx::provenance().session;
+    let commit = message_commit(&dir, &msg);
+    save_ack(
+        ctx,
+        repo,
+        &session_id,
+        &identity.role,
+        &msg.id,
+        commit.as_deref(),
+    )?;
+
+    let mut ack_message_id = None;
+    let mut published = false;
+    let mut push_error = None;
+    if publish {
+        prepare_tree(&dir)?;
+        gitx::ensure_git()?;
+        let now = chrono::Utc::now();
+        let id = crate::ctx::uuid_v4();
+        let stamp = timestamp_name(now);
+        let topic_slug = if msg.topic.is_empty() {
+            slugify(&msg.id)
+        } else {
+            slugify(&msg.topic)
+        };
+        let topic_dir = dir.join("topics").join(&topic_slug);
+        fs::create_dir_all(&topic_dir)
+            .with_context(|| format!("creating {}", topic_dir.display()))?;
+        let file_path = topic_dir.join(format!("{stamp}-{id}.txt"));
+        let ack = build_ack_message(&identity, &msg, &id, &now);
+        validate_message(&ack)?;
+        fs::write(&file_path, &ack).with_context(|| format!("writing {}", file_path.display()))?;
+        let rel = relpath(&dir, &file_path);
+        gitx::ensure_identity(&dir)?;
+        gitx::add_one(&dir, &rel)?;
+        gitx::commit(&dir, &format!("board: ack {}", msg.id))?;
+        if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
+            let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
+            match push_with_race_retry(&dir, &branch) {
+                Ok(()) => published = true,
+                Err(e) => push_error = Some(format!("{e:#}")),
+            }
+        }
+        ack_message_id = Some(id);
+    }
+
+    if ctx.common.json {
+        readout::emit(
+            "board/ack",
+            true,
+            None,
+            serde_json::json!({
+                "repo": repo.name,
+                "acknowledged_message_id": msg.id,
+                "session_id": session_id,
+                "role": identity.role,
+                "cursor_advance": true,
+                "published_ack": publish,
+                "ack_message_id": ack_message_id,
+                "published": published,
+                "push_error": push_error,
+                "sync_warning": sync_warning,
+            }),
+        );
+        return Ok(());
+    }
+    surface_sync_warning(&sync_warning);
+    println!("Acknowledged as read: {}", msg.id);
+    println!(
+        "  cursor:   advanced (session {}, role {})",
+        session_id, identity.role
+    );
+    if publish {
+        println!(
+            "  ack:      {} {}",
+            ack_message_id.unwrap_or_default(),
+            if published {
+                "remotely published"
+            } else if push_error.is_some() {
+                "committed, push failed"
+            } else {
+                "committed (local-only)"
+            }
+        );
+    } else {
+        println!("  ack:      not published (local receipt only; use --publish to post it)");
+    }
+    if let Some(err) = push_error {
+        eprintln!("push failed: {err}");
     }
     Ok(())
 }

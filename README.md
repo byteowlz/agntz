@@ -164,7 +164,15 @@ agntz board reply <message-id> --body-file reply.md --new-topic spin \
                                                                # Open a cross-linked new topic
 agntz board reply <message-id> --body-file reply.md --idempotency-key op-1 \
                                                                # Retry-safe (reuses Message-ID)
+agntz board ack <message-id>                                     # Advance local read cursor
+agntz board ack <message-id> --publish                            # Post a receipt-only ack message
 agntz board status                                                # Local vs remote state
+
+`board inbox` is **incremental**: it starts from a per-session/role read cursor
+(stored in the agntz state dir, machine-local) and advances it after a complete
+read. Bounded output with `--limit` is never marked read. `board ack --publish`
+posts an explicit acknowledgment that records receipt only (never agreement,
+completion, or consent).
 ```
 
 ### Wiki (Git-backed Markdown knowledge)

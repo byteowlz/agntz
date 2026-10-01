@@ -178,5 +178,38 @@ EOF
 STALE_OUT="$(set +e; $AGNTZ board reply 99999999-1111-1111-1111-111111111111 --body-file "$WORK/a.txt" 2>&1 || true)"
 check "echo '$STALE_OUT' | grep -qi 'stale'" "stale-role warning emitted"
 
+# A fresh local-only board so its read cursor starts clean.
+$AGNTZ board init cur "$WORK/curb" --role agent >/dev/null
+msgfile() { # $1=id $2=subject $3=body; writes a message file into topics/t
+  printf 'Message-ID: %s\nSent-At: 2026-09-28T00:00:00Z\nFrom: other-agent\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: %s\n\n%s.\n' "$1" "$2" "$3" > "$WORK/curb/topics/t/20260928T000000Z-$1.txt"
+}
+mkdir -p "$WORK/curb/topics/t"
+msgfile aaaaaaaa-1111-1111-1111-111111111111 One One
+(cd "$WORK/curb" && git add -A && git commit -q -m one)
+
+echo "[17] default inbox advances the read cursor (incremental)"
+check "$AGNTZ board inbox --role agent --name cur | grep -q 'One'" "first read shows the message"
+check "! $AGNTZ board inbox --role agent --name cur | grep -q 'One'" "second read is empty (cursor advanced)"
+msgfile bbbbbbbb-2222-2222-2222-222222222222 Two Two
+(cd "$WORK/curb" && git add -A && git commit -q -m two)
+check "$AGNTZ board inbox --role agent --name cur | grep -q 'Two'" "new message surfaces incrementally"
+
+# Bounded output must not be marked read (no skip, re-readable).
+msgfile cccccccc-3333-3333-3333-333333333333 Three Three
+msgfile dddddddd-4444-4444-4444-444444444444 Four Four
+(cd "$WORK/curb" && git add -A && git commit -q -m threefour)
+echo "[18] bounded output is NOT marked read (never skips)"
+check "$AGNTZ board inbox --role agent --name cur --limit 1 | grep -q 'Three'" "bounded read shows oldest new message"
+check "$AGNTZ board inbox --role agent --name cur --limit 1 | grep -q 'Three'" "same bounded read still shows it (not marked read)"
+
+# Explicit ack: local receipt advances the cursor; --publish posts a receipt.
+echo "[19] explicit ack advances cursor; --publish posts a receipt-only message"
+$AGNTZ board ack cccccccc-3333-3333-3333-333333333333 --name cur >/dev/null
+check "$AGNTZ board inbox --role agent --name cur | grep -q 'Four'" "after ack, only later messages remain"
+$AGNTZ board ack dddddddd-4444-4444-4444-444444444444 --name cur --publish >/dev/null
+ACKFILE="$(grep -rl 'Ack: read' "$WORK/curb/topics/t" | head -1)"
+check "test -n '$ACKFILE'" "--publish created an ack message"
+check "grep -q 'does not imply agreement' '$ACKFILE'" "ack text is receipt-only (no agreement)"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1
