@@ -665,7 +665,7 @@ fn handle_topics(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
             serde_json::json!({
                 "topic": t,
                 "count": list.len(),
-                "last_sent_at": last.and_then(|m| m.sent_at().map(str::to_string)),
+                "last_sent_at": last.and_then(|m| m.sent_at().map(normalize_datetime)),
                 "last_subject": last.and_then(|m| m.subject().map(str::to_string)),
             })
         })
@@ -906,6 +906,30 @@ fn role_matches(msg: &Message, role_lower: &str) -> bool {
     to.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
         .filter(|s| !s.is_empty())
         .any(|t| t.eq_ignore_ascii_case(role_lower))
+}
+
+/// Normalize a timestamp for stable tabular display, accepting both the
+/// RFC3339 header form (`2026-10-02T08:45:56Z`) and the compact filename form
+/// (`20261002T084556Z`); falls back to the raw value otherwise.
+fn normalize_datetime(raw: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    }
+    let b = raw.as_bytes();
+    if b.len() == 16 && b[8] == b'T' && b[15] == b'Z' {
+        let date = &raw[0..8];
+        let time = &raw[9..15];
+        return format!(
+            "{}-{}-{}T{}:{}:{}Z",
+            &date[0..4],
+            &date[4..6],
+            &date[6..8],
+            &time[0..2],
+            &time[2..4],
+            &time[4..6]
+        );
+    }
+    raw.to_string()
 }
 
 /// A human-facing title: the `Subject` when present, else the first non-empty
@@ -1155,7 +1179,7 @@ fn handle_reply(
 
     let identity = detect_identity(role_override, repo.role.as_deref());
     let body = match body_override {
-        Some(b) => b.to_string(),
+        Some(b) => agntz::unescape_body(b),
         None => read_body(body_file)?,
     };
     if body.trim().is_empty() {
@@ -1669,11 +1693,20 @@ fn handle_register(
 ) -> Result<()> {
     let expanded = agntz::config::expand_path(path)?;
 
-    // Existing remote: clone into a fresh destination.
+    // Existing remote: clone into the explicitly-given destination path (not
+    // inferred from the URL basename).
     if let Some(url) = remote
         && !expanded.exists()
     {
-        gitx::run_need(expanded.parent().unwrap_or(Path::new(".")), &["clone", url])?;
+        if let Some(parent) = expanded.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        gitx::run_need(
+            expanded.parent().unwrap_or(Path::new(".")),
+            &["clone", url, expanded.to_str().unwrap_or_default()],
+        )?;
     }
 
     if !gitx::is_repo(&expanded) {
@@ -1916,5 +1949,18 @@ Body.
 ";
         let err = validate_message(msg).unwrap_err();
         assert!(err.to_string().contains("Message-ID"));
+    }
+
+    #[test]
+    fn normalize_datetime_handles_both_forms() {
+        assert_eq!(
+            normalize_datetime("2026-10-02T08:45:56Z"),
+            "2026-10-02T08:45:56Z"
+        );
+        assert_eq!(
+            normalize_datetime("20261002T084556Z"),
+            "2026-10-02T08:45:56Z"
+        );
+        assert_eq!(normalize_datetime("bogus"), "bogus");
     }
 }

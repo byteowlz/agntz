@@ -34,6 +34,15 @@ pub fn clip_to_words(text: &str, max: usize) -> String {
     format!("{}...", clipped.trim_end())
 }
 
+/// Decode common `\n`/`\t`/`\r` escapes in an inline `--body` string so an
+/// agent composing a multi-line body in a single argument gets real newlines
+/// (not a literal backslash-n).
+pub fn unescape_body(s: &str) -> String {
+    s.replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\r", "\r")
+}
+
 /// Snap a byte range `[start, end)` inside `text` outward to word boundaries so
 /// an excerpt never begins or ends mid-word. Safe on any (possibly non-boundary)
 /// `start`/`end`.

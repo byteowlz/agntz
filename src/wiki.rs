@@ -126,6 +126,9 @@ pub enum WikiCommand {
         /// Optional remote URL.
         #[arg(long)]
         remote: Option<String>,
+        /// Optional default role (symmetry with board; stored for identity).
+        #[arg(long)]
+        role: Option<String>,
         /// Make this the default wiki.
         #[arg(long)]
         default: bool,
@@ -140,6 +143,9 @@ pub enum WikiCommand {
         /// Remote URL to clone/attach.
         #[arg(long)]
         remote: Option<String>,
+        /// Optional default role (symmetry with board; stored for identity).
+        #[arg(long)]
+        role: Option<String>,
         /// Make this the default wiki.
         #[arg(long)]
         default: bool,
@@ -214,14 +220,30 @@ pub fn handle(command: WikiCommand, ctx: &RuntimeContext) -> Result<()> {
             name,
             path,
             remote,
+            role,
             default,
-        } => handle_init(ctx, &name, &path, remote.as_deref(), default),
+        } => handle_init(
+            ctx,
+            &name,
+            &path,
+            remote.as_deref(),
+            role.as_deref(),
+            default,
+        ),
         WikiCommand::Register {
             name,
             path,
             remote,
+            role,
             default,
-        } => handle_register(ctx, &name, &path, remote.as_deref(), default),
+        } => handle_register(
+            ctx,
+            &name,
+            &path,
+            remote.as_deref(),
+            role.as_deref(),
+            default,
+        ),
         WikiCommand::Repos => handle_repo_list(ctx),
         WikiCommand::Config { name } => handle_config_cmd(ctx, name.as_deref()),
     }
@@ -495,6 +517,18 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, page_id: &str) -> Resul
         .find(|p| p.id == page_id)
         .ok_or_else(|| anyhow!("no page with id '{page_id}' in wiki"))?;
 
+    // The page's own last commit, so an agent can pass it back to `update`.
+    let rel = page
+        .path
+        .strip_prefix(&dir)
+        .unwrap_or(&page.path)
+        .to_string_lossy()
+        .to_string();
+    let revision = gitx::run(&dir, &["log", "-1", "--format=%H", "--", &rel])
+        .out()
+        .to_string();
+    let revision = revision.trim().to_string();
+
     if ctx.common.json {
         let payload = serde_json::json!({
             "repo": repo.name,
@@ -503,6 +537,7 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, page_id: &str) -> Resul
             "status": page.status,
             "kind": page.kind,
             "path": page.path.to_string_lossy(),
+            "revision": if revision.is_empty() { serde_json::Value::Null } else { serde_json::json!(revision) },
             "body": page.body,
         });
         readout::emit("wiki/read", true, None, payload);
@@ -548,7 +583,7 @@ fn handle_create(
         .map(str::to_string)
         .unwrap_or_else(|| page_id.rsplit('/').next().unwrap_or(page_id).to_string());
     let body = match body_override {
-        Some(b) => b.to_string(),
+        Some(b) => agntz::unescape_body(b),
         None => read_body(body_file)?,
     };
     let author = crate::ctx::provenance();
@@ -604,19 +639,40 @@ fn handle_update(
     }
     prepare_wiki_tree(&dir)?;
 
-    // Guard against concurrent edits: expected revision must equal HEAD.
-    let head = gitx::run(&dir, &["rev-parse", "--short", "HEAD"])
+    // Guard against concurrent edits: the expected revision must equal the
+    // page's OWN last commit (not repo HEAD), so an older page can still be
+    // updated even when HEAD has advanced. A short or full SHA is accepted.
+    let rel = page_path
+        .strip_prefix(&dir)
+        .unwrap_or(&page_path)
+        .to_string_lossy()
+        .to_string();
+    let page_commit = gitx::run(&dir, &["log", "-1", "--format=%H", "--", &rel])
         .out()
         .to_string();
-    if head != revision {
+    let page_commit = page_commit.trim().to_string();
+    if page_commit.is_empty() {
         return Err(anyhow!(
-            "revision mismatch: expected {revision}, HEAD is {head}; refetch and retry (no overwrite)"
+            "cannot determine the last commit for page '{page_id}'"
+        ));
+    }
+    let rev_full = gitx::run(
+        &dir,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+    )
+    .out()
+    .to_string();
+    let rev_full = rev_full.trim().to_string();
+    if rev_full.is_empty() || rev_full != page_commit {
+        return Err(anyhow!(
+            "revision mismatch: expected the page's current commit ({}), got {revision}; refetch and retry (no overwrite)",
+            &page_commit[..page_commit.len().min(8)]
         ));
     }
 
     let page = parse_page(&page_path, page_id, page_id)?;
     let body = match body_override {
-        Some(b) => b.to_string(),
+        Some(b) => agntz::unescape_body(b),
         None => read_body(body_file)?,
     };
 
@@ -961,6 +1017,7 @@ fn handle_init(
     name: &str,
     path: &Path,
     remote: Option<&str>,
+    role: Option<&str>,
     default: bool,
 ) -> Result<()> {
     let expanded = agntz::config::expand_path(path)?;
@@ -1029,7 +1086,7 @@ fn handle_init(
     // When a remote was explicitly given, publish the initial commit.
     crate::board::publish_initial(&expanded, remote, name)?;
 
-    register_config(ctx, name, &expanded, remote, default)?;
+    register_config(ctx, name, &expanded, remote, role, default)?;
 
     if ctx.common.json {
         readout::emit(
@@ -1052,13 +1109,23 @@ fn handle_register(
     name: &str,
     path: &Path,
     remote: Option<&str>,
+    role: Option<&str>,
     default: bool,
 ) -> Result<()> {
     let expanded = agntz::config::expand_path(path)?;
+    // Clone into the explicitly-given destination path (not URL basename).
     if let Some(url) = remote
         && !expanded.exists()
     {
-        gitx::run_need(expanded.parent().unwrap_or(Path::new(".")), &["clone", url])?;
+        if let Some(parent) = expanded.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        gitx::run_need(
+            expanded.parent().unwrap_or(Path::new(".")),
+            &["clone", url, expanded.to_str().unwrap_or_default()],
+        )?;
     }
     if !gitx::is_repo(&expanded) {
         return Err(anyhow!("{} is not a git repository", expanded.display()));
@@ -1082,7 +1149,7 @@ fn handle_register(
         );
         return Ok(());
     }
-    register_config(ctx, name, &expanded, remote, default)?;
+    register_config(ctx, name, &expanded, remote, role, default)?;
     if ctx.common.json {
         readout::emit(
             "wiki/register",
@@ -1101,13 +1168,14 @@ fn register_config(
     name: &str,
     path: &Path,
     remote: Option<&str>,
+    role: Option<&str>,
     default: bool,
 ) -> Result<()> {
     let repo = RepoConfig {
         name: name.to_string(),
         path: path.to_string_lossy().to_string(),
         remote: remote.map(str::to_string),
-        role: None,
+        role: role.map(str::to_string),
     };
     let mut cfg = ctx.config.clone();
     cfg.upsert_wiki(repo);

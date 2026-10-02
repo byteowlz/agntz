@@ -107,5 +107,23 @@ REV="$(git -C "$WORK/wiki" rev-parse --short HEAD)"
 $AGNTZ wiki update guides/inline --revision "$REV" --body 'Updated inline.' >/dev/null 2>&1
 check "grep -q 'Updated inline' '$WORK/wiki/pages/guides/inline.md'" "wiki update --body inline"
 
+echo "[11] register accepts --role (symmetry with board)"
+git clone -q "$WORK/bare.git" "$WORK/wrole"
+check "$AGNTZ wiki register rolepeer '$WORK/wrole' --remote '$WORK/bare.git' --role agent" "wiki register --role accepted"
+
+echo "[12] update accepts full SHA; read exposes the page revision"
+REVFULL="$($AGNTZ wiki read guides/setup --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["revision"])')"
+check "test -n '$REVFULL'" "read --json exposes full page revision"
+$AGNTZ wiki update guides/setup --revision "$REVFULL" --body 'Full sha body' >/dev/null 2>&1
+check "grep -q 'Full sha body' '$WORK/wiki/pages/guides/setup.md'" "update with full SHA works"
+
+echo "[13] inline --body interprets \\n escapes"
+$AGNTZ wiki create guides/newlines --body 'L1\nL2' >/dev/null 2>&1
+check "grep -q 'L2' '$WORK/wiki/pages/guides/newlines.md'" "--body interprets \\n as a real newline"
+
+echo "[14] register --remote clones into the given destination path"
+$AGNTZ wiki register dest "$WORK/destdir/custom" --remote "$WORK/bare.git" >/dev/null 2>&1
+check "test -d '$WORK/destdir/custom'" "register --remote honors the destination path"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

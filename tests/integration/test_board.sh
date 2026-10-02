@@ -221,5 +221,14 @@ check "$AGNTZ board inbox --role agent --name t2 --json 2>/dev/null | python3 -c
 $AGNTZ board reply eeeeeeee-5555-5555-5555-555555555555 --name t2 --body 'Inline reply.' >/dev/null 2>&1
 check "$AGNTZ board inbox --role all --name t2 --json 2>/dev/null | python3 -c 'import sys,json; ms=json.load(sys.stdin)[\"result\"][\"messages\"]; assert any(\"Inline reply\" in m[\"title\"] for m in ms)'" "reply --body inline (no file)"
 
+echo "[21] configured repo paths are stored absolute (cwd-independent)"
+check "grep -Eq '^path = \"/' '$WORK/cfg/agntz/config.toml'" "config stores absolute repo paths"
+
+# register --remote clones into the given destination, not the URL basename.
+git init -q "$WORK/gitrepo" && (cd "$WORK/gitrepo" && git -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m seed)
+echo "[22] register --remote honors the destination path"
+check "$AGNTZ board register dest '$WORK/destdir/custom' --remote '$WORK/gitrepo' --role agent" "board register --remote into given destination"
+check "test -d '$WORK/destdir/custom'" "destination directory created"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

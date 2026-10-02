@@ -240,7 +240,10 @@ pub fn expand_path(path: &Path) -> Result<PathBuf> {
 /// Returns an error if expansion fails.
 pub fn expand_str_path(text: &str) -> Result<PathBuf> {
     let expanded = shellexpand::full(text).context("expanding path")?;
-    Ok(PathBuf::from(expanded.to_string()))
+    // Store/resolve an absolute, normalized path so a board/wiki registered from
+    // one cwd is always found from another (relative paths in config are a
+    // cwd-coupling footgun that can silently open the wrong repo).
+    Ok(std::path::absolute(PathBuf::from(expanded.to_string()))?)
 }
 
 /// Resolve a base dir with the given precedence.
