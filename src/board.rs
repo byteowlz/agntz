@@ -714,10 +714,15 @@ fn handle_inbox(
 
     // Per-session/role read cursor. An explicit `--since` overrides it; otherwise
     // the stored cursor is the default starting point (incremental inbox).
+    // `--since all` is an explicit escape hatch: ignore the cursor entirely and
+    // show the full history (and never advance the cursor).
     let session_id = crate::ctx::provenance().session;
     let cursor = current_cursor(ctx, repo, &session_id, role)?;
     let auto = since.is_none();
-    let effective_since: Option<String> = if auto {
+    let since_all = since.is_some_and(|s| s.eq_ignore_ascii_case("all"));
+    let effective_since: Option<String> = if since_all {
+        None
+    } else if auto {
         cursor
             .last_acked_commit
             .clone()
@@ -729,7 +734,10 @@ fn handle_inbox(
     // Find the cursor position. An explicit `--since` uses the single-value
     // resolver; otherwise the stored cursor (acked id + commit) is used so we
     // neither over-ack siblings in a commit nor skip late/skewed arrivals.
-    let cutoff_pos = if auto {
+    // `--since all` bypasses the cursor entirely.
+    let cutoff_pos = if since_all {
+        None
+    } else if auto {
         resolve_cursor_for_read(
             &dir,
             &messages,
@@ -769,7 +777,7 @@ fn handle_inbox(
     // Auto-advance the read cursor after a complete (non-truncated) read, and
     // only when not using an explicit `--since` (manual control). Bounded output
     // is intentionally NOT marked read, so nothing is skipped.
-    if auto && !truncated {
+    if auto && !since_all && !truncated {
         let head = gitx::run(&dir, &["rev-parse", "HEAD"]).out().to_string();
         let head = head.trim();
         let last_id = messages.last().map(|m| m.id.as_str()).unwrap_or("");
@@ -804,6 +812,17 @@ fn handle_inbox(
             ""
         };
         println!("Inbox for role '{}' is empty{}", role, suffix);
+        // Make the incremental semantics visible: an empty inbox after a plain
+        // read usually means the cursor already consumed it, not an empty board.
+        if auto && !since_all {
+            println!(
+                "note: everything already read{}; use --since all for full history",
+                effective_since
+                    .as_deref()
+                    .map(|s| format!(" up to {s}"))
+                    .unwrap_or_default()
+            );
+        }
         surface_sync_warning(&sync_warning);
         return Ok(());
     }
@@ -832,7 +851,10 @@ fn resolve_cursor_for_read(
     let Some(id) = acked_id else {
         return Ok(None);
     };
-    let pos = messages.iter().position(|m| m.id == id);
+    let want = normalize_message_id(id);
+    let pos = messages
+        .iter()
+        .position(|m| normalize_message_id(&m.id) == want);
     let mut keep = Vec::new();
     for (idx, m) in messages.iter().enumerate() {
         let after = pos.is_some_and(|p| idx > p);
@@ -871,7 +893,10 @@ fn resolve_cursor(
     let Some(since) = since else {
         return Ok(None);
     };
-    if let Some(pos) = messages.iter().position(|m| m.id == since) {
+    if let Some(pos) = messages
+        .iter()
+        .position(|m| normalize_message_id(&m.id) == normalize_message_id(since))
+    {
         return Ok(Some((pos + 1..messages.len()).collect()));
     }
     if gitx::run(
@@ -1004,12 +1029,26 @@ fn short_id(id: &str) -> String {
     }
 }
 
+/// Normalize a Message-ID for comparison: trim whitespace and strip RFC5322
+/// angle brackets, so `<id>` (as it appears on the wire / in some clients) and
+/// the bare id are the same key everywhere (read/reply/ack/--since).
+fn normalize_message_id(id: &str) -> String {
+    id.trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+        .to_string()
+}
+
 fn find_message(dir: &Path, id: &str) -> Result<Message> {
+    let want = normalize_message_id(id);
     let messages = scan_messages(dir)?;
     messages
         .into_iter()
-        .find(|m| m.id == id)
-        .ok_or_else(|| anyhow!("no message with Message-ID {id} in board (did the fetch run?)"))
+        .find(|m| normalize_message_id(&m.id) == want)
+        .ok_or_else(|| {
+            anyhow!("no message with Message-ID {want} in board (check the id, or sync if it was posted by another agent)")
+        })
 }
 
 fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Result<()> {

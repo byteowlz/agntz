@@ -144,7 +144,11 @@ UPD="${UPD:0:7}"
 $AGNTZ wiki update guides/setup --revision "$UPD" --body 'Provenance body' >/dev/null 2>&1
 check "grep -q 'updated-by-machine' '$WORK/wiki/pages/guides/setup.md'" "updated-by-machine stamped"
 
-# Restore clean validate state (create a broken link is not needed here; the
-# earlier bad page still has a broken link, so validate is not clean).
+echo "[18] wiki update accepts the .md and pages/ forms (parity with read)"
+UPD2="$($AGNTZ wiki read guides/setup --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["revision"])')"
+check "$AGNTZ wiki update guides/setup.md --revision \"$UPD2\" --body 'Md form body'" "update with .md suffix"
+UPD3="$($AGNTZ wiki read guides/setup --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["revision"])')"
+check "$AGNTZ wiki update pages/guides/setup --revision \"$UPD3\" --body 'Pages form body'" "update with pages/ prefix"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

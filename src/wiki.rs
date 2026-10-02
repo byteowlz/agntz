@@ -998,7 +998,9 @@ fn prepare_wiki_tree(dir: &Path) -> Result<()> {
 
 /// Resolve the page path within `pages/`, rejecting traversal/symlink escapes.
 fn resolve_page_path(dir: &Path, page_id: &str) -> Result<PathBuf> {
-    let mut safe = page_id.to_string();
+    // Accept the natural forms an agent copies out of `wiki read` (a `pages/`
+    // prefix or a `.md` suffix) and resolve them to the canonical page id.
+    let mut safe = normalize_page_id(page_id);
     // Reject absolute and escaping paths.
     if safe.starts_with('/') || safe.contains("..") || safe.contains('\\') {
         return Err(anyhow!("invalid page id '{page_id}'"));

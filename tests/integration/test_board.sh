@@ -244,5 +244,21 @@ printf 'Message-ID: efefefef-8888-8888-8888-888888888888\nSent-At: 2026-10-02T12
 (cd "$WORK/board" && git add -A && git commit -q -m off && git push -q origin master)
 check "$AGNTZ board topics 2>/dev/null | grep -q '2026-10-02T10:00:00Z'" "+02:00 offset renders as UTC in topics"
 
+# A message whose Message-ID header carries RFC5322 angle brackets must be
+# addressable by BOTH the bracketed and the bare id (read/reply/ack/--since).
+echo "[25] Message-ID lookup is bracket-insensitive"
+mkdir -p "$WORK/board/topics/br"
+printf 'Message-ID: <cccccccc-9999-9999-9999-999999999999>\nSent-At: 2026-10-03T00:00:00Z\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Br\n\nBr.\n' > "$WORK/board/topics/br/20261003T000000Z-br.txt"
+(cd "$WORK/board" && git add -A && git commit -q -m br && git push -q origin master)
+check "$AGNTZ board read '<cccccccc-9999-9999-9999-999999999999>'" "read with bracketed id"
+check "$AGNTZ board read 'cccccccc-9999-9999-9999-999999999999'" "read with bare id"
+check "$AGNTZ board reply 'cccccccc-9999-9999-9999-999999999999' --body r >/dev/null 2>&1" "reply by bare id of a bracketed message"
+
+echo "[26] --since all bypasses the read cursor (full history)"
+$AGNTZ board inbox --role agent >/dev/null 2>&1
+check "$AGNTZ board inbox --role agent --since all 2>/dev/null | grep -q 'cccccccc-9999'" "--since all shows already-read messages"
+# And the no-arg read states that the cursor consumed the board.
+check "$AGNTZ board inbox --role agent 2>/dev/null | grep -q 'use --since all'" "empty inbox notes the cursor + escape hatch"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1
