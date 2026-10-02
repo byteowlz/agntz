@@ -212,6 +212,18 @@ pub fn fetch(dir: &Path, remote: &str) -> Result<()> {
 /// missing/unreachable). The caller should surface that warning so an empty
 /// inbox is never mistaken for "nothing new" when the sync actually failed.
 /// A `sync_for_read` error is reserved for genuinely fatal local problems.
+/// The `origin` URL of a repo, if one is configured (used to inherit a remote
+/// when registering a repo that was already cloned).
+pub fn remote_origin(dir: &Path) -> Option<String> {
+    let s = run(dir, &["remote", "get-url", "origin"]).out().to_string();
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
 pub fn sync_for_read(dir: &Path, remote: &str, branch: &str) -> Result<Option<String>> {
     if let Err(e) = run_need(dir, &["fetch", remote]) {
         let msg = format!("fetch from {remote} failed ({e:#}); reading local tree only");

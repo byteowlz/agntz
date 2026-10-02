@@ -125,5 +125,26 @@ echo "[14] register --remote clones into the given destination path"
 $AGNTZ wiki register dest "$WORK/destdir/custom" --remote "$WORK/bare.git" >/dev/null 2>&1
 check "test -d '$WORK/destdir/custom'" "register --remote honors the destination path"
 
+echo "[15] validate --json exits non-zero on broken links (single envelope)"
+$AGNTZ wiki validate --json > "$WORK/val.json" 2>/dev/null || true
+check "test -s '$WORK/val.json'" "validate --json produced output"
+check "python3 -c 'import json; d=json.load(open(\"$WORK/val.json\")); assert d.get(\"ok\") is False'" "validate --json ok:false"
+# The generic error envelope should NOT be duplicated: exactly one JSON doc.
+check "grep -c '\"schema\"' '$WORK/val.json' | grep -qx 1" "validate --json emits a single envelope"
+if set +e; $AGNTZ wiki validate --json >/dev/null 2>&1; then echo "  ✗ validate --json should exit non-zero"; fail=$((fail+1)); else echo "  ✓ validate --json exits non-zero (broken)"; pass=$((pass+1)); fi
+
+echo "[16] wiki read tolerates .md and pages/ prefix"
+check "$AGNTZ wiki read guides/setup.md | grep -q 'Full sha body'" "read with .md suffix"
+check "$AGNTZ wiki read pages/guides/setup | grep -q 'Full sha body'" "read with pages/ prefix"
+
+echo "[17] wiki update stamps updated-by machine/workspace"
+UPD="$AGNTZ wiki read guides/setup --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"result\"][\"revision\"])'"
+# Use the short sha (page's own commit) here to also re-exercise acceptance.
+UPD="${UPD:0:7}"
+$AGNTZ wiki update guides/setup --revision "$UPD" --body 'Provenance body' >/dev/null 2>&1
+check "grep -q 'updated-by-machine' '$WORK/wiki/pages/guides/setup.md'" "updated-by-machine stamped"
+
+# Restore clean validate state (create a broken link is not needed here; the
+# earlier bad page still has a broken link, so validate is not clean).
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

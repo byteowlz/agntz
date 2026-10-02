@@ -913,7 +913,12 @@ fn role_matches(msg: &Message, role_lower: &str) -> bool {
 /// (`20261002T084556Z`); falls back to the raw value otherwise.
 fn normalize_datetime(raw: &str) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
-        return dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        // Convert any offset to UTC so the display is unambiguous (a +02:00
+        // header renders as the corresponding UTC instant, not the literal 'Z').
+        return dt
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
     }
     let b = raw.as_bytes();
     if b.len() == 16 && b[8] == b'T' && b[15] == b'Z' {
@@ -1692,6 +1697,14 @@ fn handle_register(
     default: bool,
 ) -> Result<()> {
     let expanded = agntz::config::expand_path(path)?;
+
+    // Inherit the repo's existing git origin when `--remote` wasn't given, so
+    // the read fetch+ff (which keys off the config remote) also covers the
+    // common clone-then-register flow.
+    let remote_owned = remote
+        .map(str::to_string)
+        .or_else(|| gitx::remote_origin(&expanded));
+    let remote = remote_owned.as_deref();
 
     // Existing remote: clone into the explicitly-given destination path (not
     // inferred from the URL basename).

@@ -230,5 +230,19 @@ echo "[22] register --remote honors the destination path"
 check "$AGNTZ board register dest '$WORK/destdir/custom' --remote '$WORK/gitrepo' --role agent" "board register --remote into given destination"
 check "test -d '$WORK/destdir/custom'" "destination directory created"
 
+echo "[23] register without --remote inherits git origin (stale clone syncs)"
+git clone -q "$WORK/bare.git" "$WORK/peer2"
+$AGNTZ board register peer2 "$WORK/peer2" --role agent >/dev/null 2>&1
+check "grep -A3 'name = \"peer2\"' '$WORK/cfg/agntz/config.toml' | grep -q 'remote ='" "register inherited git origin into config"
+printf 'Message-ID: abcdabcd-7777-7777-7777-777777777777\nSent-At: 2026-09-29T00:00:00Z\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Fresh\n\nFresh.\n' > "$WORK/board/topics/hello/20260929T000000Z-abcdabcd-7777-7777-7777-777777777777.txt"
+(cd "$WORK/board" && git add -A && git commit -q -m fresh && git push -q origin master)
+check "$AGNTZ board inbox --role agent --name peer2 2>/dev/null | grep -q abcdabcd" "stale peer2 auto-syncs via inherited remote"
+
+echo "[24] topic timestamps with an offset render as UTC"
+mkdir -p "$WORK/board/topics/off"
+printf 'Message-ID: efefefef-8888-8888-8888-888888888888\nSent-At: 2026-10-02T12:00:00+02:00\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Off\n\nOff.\n' > "$WORK/board/topics/off/20261002T100000Z-efefefef-8888-8888-8888-888888888888.txt"
+(cd "$WORK/board" && git add -A && git commit -q -m off && git push -q origin master)
+check "$AGNTZ board topics 2>/dev/null | grep -q '2026-10-02T10:00:00Z'" "+02:00 offset renders as UTC in topics"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

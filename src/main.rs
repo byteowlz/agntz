@@ -326,12 +326,15 @@ async fn try_main() -> Result<()> {
     let cli = Cli::parse();
     let ctx = RuntimeContext::new(cli.common.clone())?;
 
+    readout::reset_emitted();
     let result: Result<()> = async { dispatch(cli.command, &ctx).await }.await;
 
     if let Err(e) = result {
         // In --json mode always emit the stable envelope on failure too, so a
-        // model never has to parse non-JSON stderr.
-        if ctx.common.json {
+        // model never has to parse non-JSON stderr. Skip it if the command
+        // already emitted its own ok:false envelope (e.g. wiki validate), so
+        // stdout stays a single document while the exit code is still non-zero.
+        if ctx.common.json && !readout::emitted_error() {
             readout::emit(
                 "error",
                 false,

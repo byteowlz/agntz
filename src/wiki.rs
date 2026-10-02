@@ -348,6 +348,14 @@ fn scan_pages(dir: &Path) -> Result<Vec<Page>> {
     Ok(out)
 }
 
+/// Normalize a page id supplied by the user: tolerate a leading `pages/` prefix
+/// and a trailing `.md`, so natural file paths work for `wiki read`/lookups.
+fn normalize_page_id(id: &str) -> String {
+    id.trim_start_matches("pages/")
+        .trim_end_matches(".md")
+        .to_string()
+}
+
 fn walk_pages(root: &Path, current: &Path, out: &mut Vec<Page>) -> Result<()> {
     for entry in fs::read_dir(current)
         .with_context(|| format!("reading {}", current.display()))?
@@ -512,9 +520,10 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, page_id: &str) -> Resul
     let dir = PathBuf::from(&repo.path);
     sync_wiki(&dir, repo)?;
     let pages = scan_pages(&dir)?;
+    let want = normalize_page_id(page_id);
     let page = pages
         .iter()
-        .find(|p| p.id == page_id)
+        .find(|p| p.id == want)
         .ok_or_else(|| anyhow!("no page with id '{page_id}' in wiki"))?;
 
     // The page's own last commit, so an agent can pass it back to `update`.
@@ -785,6 +794,12 @@ fn stamp_updater(front: &mut BTreeMap<String, String>, updater: &crate::ctx::Pro
     front.insert("updated-by-agent".to_string(), updater.agent.clone());
     front.insert("updated-by-session".to_string(), updater.session.clone());
     front.insert("updated-by-host".to_string(), updater.host.clone());
+    if let Some(m) = updater.machine.as_deref() {
+        front.insert("updated-by-machine".to_string(), m.to_string());
+    }
+    if let Some(w) = updater.workspace.as_deref() {
+        front.insert("updated-by-workspace".to_string(), w.to_string());
+    }
 }
 
 fn write_and_publish(
@@ -861,7 +876,9 @@ fn handle_validate(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
 
     if ctx.common.json {
         // Keep the machine contract consistent with the text path: broken links
-        // mean the validation is NOT ok.
+        // mean the validation is NOT ok. Emit the ok:false payload (the dispatcher
+        // won't add a second generic envelope), then return Err so the exit code
+        // is non-zero and scripts detect the failure.
         let ok = broken.is_empty();
         readout::emit(
             "wiki/validate",
@@ -873,7 +890,10 @@ fn handle_validate(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
                 "broken": broken_json,
             }),
         );
-        return Ok(());
+        if ok {
+            return Ok(());
+        }
+        return Err(anyhow!("{} broken link(s) found", broken.len()));
     }
 
     if broken.is_empty() {
@@ -1113,6 +1133,15 @@ fn handle_register(
     default: bool,
 ) -> Result<()> {
     let expanded = agntz::config::expand_path(path)?;
+
+    // Inherit the repo's existing git origin when `--remote` wasn't given, so
+    // the read fetch+ff (which keys off the config remote) covers clone-then-
+    // register.
+    let remote_owned = remote
+        .map(str::to_string)
+        .or_else(|| gitx::remote_origin(&expanded));
+    let remote = remote_owned.as_deref();
+
     // Clone into the explicitly-given destination path (not URL basename).
     if let Some(url) = remote
         && !expanded.exists()

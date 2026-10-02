@@ -13,7 +13,25 @@
 //! or its raw text otherwise — always a legal JSON document.
 
 use serde_json::{Value, json};
+use std::cell::RefCell;
 
+// Whether the last `emit` in this call produced an *error* envelope (`ok:false`).
+// Used by the top-level dispatcher so a command that already emitted its own
+// failure envelope doesn't get a second generic one on stdout (and so the exit
+// code can still be non-zero for `--json` failures).
+thread_local! {
+    static LAST_OK: RefCell<Option<bool>> = const { RefCell::new(None) };
+}
+
+/// Reset the per-dispatch emit tracking (called before each command runs).
+pub fn reset_emitted() {
+    LAST_OK.with(|c| *c.borrow_mut() = None);
+}
+
+/// Whether the command already emitted an error (`ok:false`) envelope.
+pub fn emitted_error() -> bool {
+    LAST_OK.with(|c| matches!(*c.borrow(), Some(false)))
+}
 /// Run a wrapped tool, returning (success, stdout, stderr). Never panics.
 pub fn run(tool: &str, args: &[String]) -> (bool, String, String) {
     match std::process::Command::new(tool).args(args).output() {
@@ -45,6 +63,7 @@ pub fn emit(verb: &str, ok: bool, error: Option<String>, result: Value) {
         "error": error,
         "result": result,
     });
+    LAST_OK.with(|c| *c.borrow_mut() = Some(ok));
     println!(
         "{}",
         serde_json::to_string_pretty(&envelope).unwrap_or_default()
