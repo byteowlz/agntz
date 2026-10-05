@@ -22,7 +22,7 @@ use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use log::LevelFilter;
 
@@ -426,25 +426,45 @@ struct HstryJsonResponse<T> {
     error: Option<String>,
 }
 
+/// hstry's search envelope nests the hits inside a `result` object that also
+/// carries scope/paging metadata.
+#[derive(serde::Deserialize)]
+struct HstrySearchResult {
+    hits: Vec<HstrySearchHit>,
+}
+
+/// A histry search hit (current histry shape: `readable_id`, `timestamp`,
+/// `provenance`; the old `message_id`/`score`/`created_at` fields are gone).
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct HstrySearchHit {
-    message_id: String,
     conversation_id: String,
-    message_idx: i32,
+    #[serde(default)]
+    readable_id: Option<String>,
+    #[serde(default)]
+    message_idx: i64,
+    #[serde(default)]
     role: String,
-    content: String,
+    #[serde(default)]
     snippet: String,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
-    conv_created_at: chrono::DateTime<chrono::Utc>,
-    conv_updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    score: f32,
-    source_id: String,
-    external_id: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
     title: Option<String>,
-    workspace: Option<String>,
-    source_adapter: String,
-    source_path: Option<String>,
-    host: Option<String>,
+}
+
+impl HstrySearchHit {
+    /// Best session identifier for filtering/display.
+    fn session_key(&self) -> &str {
+        self.readable_id.as_deref().unwrap_or(&self.conversation_id)
+    }
+
+    /// Parse the hit timestamp (RFC 3339) for `-d/--days` filtering.
+    fn ts(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.timestamp
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+    }
 }
 
 async fn handle_search(
@@ -496,14 +516,25 @@ async fn handle_search(
         .output()
         .context("failed to run hstry - is hstry installed and the service running?")?;
 
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // hstry signals a missing service with a human message; surface its own
+    // guidance instead of a generic parse failure.
+    if stdout.contains("Search service unavailable")
+        || stderr.contains("Search service unavailable")
+    {
+        anyhow::bail!(
+            "hstry search service unavailable; run `hstry service start` or set HSTRY_NO_SERVICE=1 for local search"
+        );
+    }
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("hstry search failed: {stderr}");
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let response: HstryJsonResponse<Vec<HstrySearchHit>> =
-        serde_json::from_str(&stdout).context("failed to parse hstry search output")?;
+    let response: HstryJsonResponse<HstrySearchResult> = serde_json::from_str(&stdout)
+        .map_err(|e| anyhow!("failed to parse hstry search output: {e}"))?;
 
     if !response.ok {
         let error = response
@@ -512,7 +543,7 @@ async fn handle_search(
         anyhow::bail!(error);
     }
 
-    let mut hits = response.result.unwrap_or_default();
+    let mut hits = response.result.map(|r| r.hits).unwrap_or_default();
     hits = filter_hits(hits, session.as_deref(), days);
     hits.truncate(limit);
 
@@ -554,29 +585,19 @@ fn filter_hits(
 
     for hit in hits {
         if let Some(session_id) = session {
-            let session_match = hit
-                .external_id
-                .as_deref()
-                .map(|id| id == session_id)
-                .unwrap_or(false)
-                || hit.conversation_id == session_id
-                || hit
-                    .source_path
-                    .as_deref()
-                    .map(|path| path.contains(session_id))
-                    .unwrap_or(false);
+            let session_match =
+                hit.session_key() == session_id || hit.conversation_id == session_id;
             if !session_match {
                 continue;
             }
         }
 
         if let Some(cutoff) = cutoff {
-            let timestamp = hit
-                .created_at
-                .or(hit.conv_updated_at)
-                .unwrap_or(hit.conv_created_at);
-            if timestamp < cutoff {
-                continue;
+            match hit.ts() {
+                Some(ts) if ts < cutoff => continue,
+                // A hit with no parseable timestamp is kept: absence of a date
+                // is not proof of age, and dropping it would hide results.
+                _ => {}
             }
         }
 
@@ -593,26 +614,19 @@ fn print_compact_hits(hits: &[HstrySearchHit]) {
     }
 
     for hit in hits {
-        let session_id = hit
-            .external_id
-            .as_deref()
-            .unwrap_or(hit.conversation_id.as_str());
+        let session_id = hit.session_key();
         let title = compact_label(hit.title.as_deref().unwrap_or("Untitled"), 40);
         let snippet = compact_snippet(&hit.snippet, 160);
-        let workspace = hit
-            .workspace
-            .as_deref()
-            .and_then(|w| w.rsplit('/').next())
-            .unwrap_or("-");
+        let when = hit
+            .ts()
+            .map(|t| t.format("%y-%m-%d").to_string())
+            .unwrap_or_else(|| "-".into());
 
         println!(
-            "{score:>5.2} {source} {role} {session} #{idx} {workspace} {title} - {snippet}",
-            score = hit.score,
-            source = hit.source_id,
+            "{when} {role} {session} #{idx} {title} - {snippet}",
             role = hit.role,
             session = session_id,
             idx = hit.message_idx,
-            workspace = workspace,
             title = title
         );
     }
@@ -724,10 +738,9 @@ async fn handle_init(force: bool, ctx: &RuntimeContext) -> Result<()> {
     println!("Initializing agntz for repo: {repo_name}");
 
     println!("\n[1/3] Initializing mmry store...");
-    let mut mmry_args = vec!["init".to_string(), "--store".to_string(), repo_name.clone()];
-    if force {
-        mmry_args.push("--force".to_string());
-    }
+    // mmry 0.14: `init` is cwd-based (registers the current repository in the
+    // central store); the old `--store <name>` / `--force` flags are gone.
+    let mmry_args = vec!["init".to_string()];
     let mmry_output = Command::new("mmry")
         .args(&mmry_args)
         .output()
@@ -736,8 +749,16 @@ async fn handle_init(force: bool, ctx: &RuntimeContext) -> Result<()> {
     if !mmry_output.stdout.is_empty() {
         print!("{}", String::from_utf8_lossy(&mmry_output.stdout));
     }
-    if !mmry_output.stderr.is_empty() && !mmry_output.status.success() {
+    if !mmry_output.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&mmry_output.stderr));
+    }
+    // A failed store init must not be swallowed: `init` is only done when every
+    // step actually succeeded.
+    if !mmry_output.status.success() {
+        anyhow::bail!(
+            "mmry store init failed (exit {}); fix the issue above and re-run `agntz init`",
+            mmry_output.status
+        );
     }
 
     println!("[2/3] Initializing trx...");
@@ -754,8 +775,14 @@ async fn handle_init(force: bool, ctx: &RuntimeContext) -> Result<()> {
     if !trx_output.stdout.is_empty() {
         print!("{}", String::from_utf8_lossy(&trx_output.stdout));
     }
-    if !trx_output.stderr.is_empty() && !trx_output.status.success() {
+    if !trx_output.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&trx_output.stderr));
+    }
+    if !trx_output.status.success() {
+        anyhow::bail!(
+            "trx init failed (exit {}); fix the issue above and re-run `agntz init`",
+            trx_output.status
+        );
     }
 
     println!("[3/3] Updating AGENTS.md...");
@@ -767,7 +794,7 @@ Use agntz for memory:
 
 ```bash
 agntz memory search "topic"    # Find relevant context
-agntz memory add "insight" -c category
+agntz memory add "insight" --why "why it matters" --source "where from"
 agntz memory list
 ```
 "#

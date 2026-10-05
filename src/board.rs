@@ -1555,15 +1555,52 @@ pub(crate) fn publish_initial(dir: &Path, remote: Option<&str>, name: &str) -> R
     if !gitx::has_remote(dir, "origin") {
         return Ok(());
     }
-    let branch = gitx::current_branch(dir).unwrap_or_else(|| "master".to_string());
+    let branch = gitx::current_branch(dir).unwrap_or_else(|| "main".to_string());
     match gitx::run_need(dir, &["push", "-u", "origin", &branch]) {
-        Ok(_) => log::info!("initialized {name}: pushed to origin/{branch}"),
+        Ok(_) => {
+            log::info!("initialized {name}: pushed to origin/{branch}");
+            repair_remote_head(Path::new(remote), &branch);
+        }
         Err(e) => eprintln!(
             "note: initial push to {remote} failed ({e:#}); {} is valid locally, push with `git push -u origin {branch}`",
             dir.display()
         ),
     }
     Ok(())
+}
+
+/// After the first push, point a LOCAL bare remote's HEAD at the branch that now
+/// exists. A bare created with an older default (`master`) has a HEAD that
+/// dangles once only `main` is pushed, which makes every clone check out an
+/// empty tree. Best-effort: URL remotes (GitHub etc.) are skipped.
+fn repair_remote_head(remote: &Path, branch: &str) {
+    if !remote.is_dir() {
+        return; // not a local path
+    }
+    let head = gitx::run(remote, &["symbolic-ref", "--short", "HEAD"])
+        .out()
+        .to_string();
+    let head = head.trim().to_string();
+    if head == branch {
+        return;
+    }
+    // Only rewrite a dangling HEAD (the ref it names does not exist).
+    if gitx::run(
+        remote,
+        &["rev-parse", "--verify", &format!("refs/heads/{head}")],
+    )
+    .ok
+    {
+        return;
+    }
+    if gitx::run(
+        remote,
+        &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
+    )
+    .ok
+    {
+        log::info!("remote HEAD updated to {branch} (was dangling at '{head}')");
+    }
 }
 
 fn relpath(root: &Path, path: &Path) -> String {

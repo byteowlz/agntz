@@ -22,7 +22,7 @@ export GIT_AUTHOR_EMAIL="board@test.invalid"
 export GIT_COMMITTER_NAME="Board Test"
 export GIT_COMMITTER_EMAIL="board@test.invalid"
 
-git init -q --bare "$WORK/bare.git"
+git init -q --bare -b main "$WORK/bare.git"
 
 pass=0; fail=0
 check() { if eval "$1" >/dev/null 2>&1; then echo "  ✓ $2"; pass=$((pass+1)); else echo "  ✗ $2"; fail=$((fail+1)); fi; }
@@ -56,7 +56,7 @@ Subject: Hello
 
 Hello `code` and $NOT_EXPANDED.
 EOF
-(cd "$WORK/board" && git add -A && git commit -q -m "inbound" && git push -q origin master)
+(cd "$WORK/board" && git add -A && git commit -q -m "inbound" && git push -q origin main)
 check "$AGNTZ board topics" "topics"
 check "$AGNTZ board read 11111111-1111-1111-1111-111111111111" "read"
 check "$AGNTZ board inbox --role agent --json" "inbox --role agent --json"
@@ -104,13 +104,13 @@ Subject: Late
 
 Second.
 EOF
-(cd "$WORK/board" && git add -A && git commit -q -m "inbound2" && git push -q origin master)
+(cd "$WORK/board" && git add -A && git commit -q -m "inbound2" && git push -q origin main)
 
 echo "[8] stale clone auto-syncs (fetch+merge) before a read (P0-1)"
 check "$AGNTZ board inbox --role agent --name peer | grep -q 22222222-2222-2222-2222-222222222222" \
   "stale clone sees pushed message without manual pull"
 
-FIRST_REV="$(git -C "$WORK/board" rev-parse --short master~1)"
+FIRST_REV="$(git -C "$WORK/board" rev-parse --short main~1)"
 echo "[9] inbox --since <commit> narrows to messages after it (P1-4)"
 check "$AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 22222222-2222-2222-2222-222222222222" \
   "--since commit shows the later message"
@@ -174,7 +174,7 @@ Subject: Old
 
 Old.
 EOF
-(cd "$WORK/board" && git add -A && git commit -q -m ghost && git push -q origin master)
+(cd "$WORK/board" && git add -A && git commit -q -m ghost && git push -q origin main)
 STALE_OUT="$(set +e; $AGNTZ board reply 99999999-1111-1111-1111-111111111111 --body-file "$WORK/a.txt" 2>&1 || true)"
 check "echo '$STALE_OUT' | grep -qi 'stale'" "stale-role warning emitted"
 
@@ -235,13 +235,13 @@ git clone -q "$WORK/bare.git" "$WORK/peer2"
 $AGNTZ board register peer2 "$WORK/peer2" --role agent >/dev/null 2>&1
 check "grep -A3 'name = \"peer2\"' '$WORK/cfg/agntz/config.toml' | grep -q 'remote ='" "register inherited git origin into config"
 printf 'Message-ID: abcdabcd-7777-7777-7777-777777777777\nSent-At: 2026-09-29T00:00:00Z\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Fresh\n\nFresh.\n' > "$WORK/board/topics/hello/20260929T000000Z-abcdabcd-7777-7777-7777-777777777777.txt"
-(cd "$WORK/board" && git add -A && git commit -q -m fresh && git push -q origin master)
+(cd "$WORK/board" && git add -A && git commit -q -m fresh && git push -q origin main)
 check "$AGNTZ board inbox --role agent --name peer2 2>/dev/null | grep -q abcdabcd" "stale peer2 auto-syncs via inherited remote"
 
 echo "[24] topic timestamps with an offset render as UTC"
 mkdir -p "$WORK/board/topics/off"
 printf 'Message-ID: efefefef-8888-8888-8888-888888888888\nSent-At: 2026-10-02T12:00:00+02:00\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Off\n\nOff.\n' > "$WORK/board/topics/off/20261002T100000Z-efefefef-8888-8888-8888-888888888888.txt"
-(cd "$WORK/board" && git add -A && git commit -q -m off && git push -q origin master)
+(cd "$WORK/board" && git add -A && git commit -q -m off && git push -q origin main)
 check "$AGNTZ board topics 2>/dev/null | grep -q '2026-10-02T10:00:00Z'" "+02:00 offset renders as UTC in topics"
 
 # A message whose Message-ID header carries RFC5322 angle brackets must be
@@ -249,7 +249,7 @@ check "$AGNTZ board topics 2>/dev/null | grep -q '2026-10-02T10:00:00Z'" "+02:00
 echo "[25] Message-ID lookup is bracket-insensitive"
 mkdir -p "$WORK/board/topics/br"
 printf 'Message-ID: <cccccccc-9999-9999-9999-999999999999>\nSent-At: 2026-10-03T00:00:00Z\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Br\n\nBr.\n' > "$WORK/board/topics/br/20261003T000000Z-br.txt"
-(cd "$WORK/board" && git add -A && git commit -q -m br && git push -q origin master)
+(cd "$WORK/board" && git add -A && git commit -q -m br && git push -q origin main)
 check "$AGNTZ board read '<cccccccc-9999-9999-9999-999999999999>'" "read with bracketed id"
 check "$AGNTZ board read 'cccccccc-9999-9999-9999-999999999999'" "read with bare id"
 check "$AGNTZ board reply 'cccccccc-9999-9999-9999-999999999999' --body r >/dev/null 2>&1" "reply by bare id of a bracketed message"

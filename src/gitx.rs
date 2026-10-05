@@ -140,7 +140,14 @@ pub fn unpushed_commits(dir: &Path, remote: &str, branch: &str) -> Vec<String> {
 ///
 /// Returns an error if `git init` fails.
 pub fn init(dir: &Path) -> Result<()> {
-    run_need(dir, &["init"])?;
+    // Pin the initial branch so a board/wiki repo is deterministic across
+    // machines: `git init` otherwise honours the local `init.defaultBranch`
+    // (often `master`), which forks from GitHub-style remotes whose default is
+    // `main` — the first push then lands on a branch nobody clones.
+    if run_need(dir, &["init", "--initial-branch=main"]).is_err() {
+        // Older git without `-b`: fall back to the platform default.
+        run_need(dir, &["init"])?;
+    }
     Ok(())
 }
 

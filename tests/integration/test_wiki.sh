@@ -22,7 +22,7 @@ export GIT_AUTHOR_EMAIL="wiki@test.invalid"
 export GIT_COMMITTER_NAME="Wiki Test"
 export GIT_COMMITTER_EMAIL="wiki@test.invalid"
 
-git init -q --bare "$WORK/bare.git"
+git init -q --bare -b main "$WORK/bare.git"
 
 pass=0; fail=0
 check() { if eval "$1" >/dev/null 2>&1; then echo "  ✓ $2"; pass=$((pass+1)); else echo "  ✗ $2"; fail=$((fail+1)); fi; }

@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
-use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,15 +12,24 @@ pub enum MemoryCommand {
     Add {
         /// Memory content (or - for stdin)
         content: String,
-        /// Category
-        #[arg(short, long)]
-        category: Option<String>,
         /// Tags (comma-separated)
-        #[arg(short, long)]
+        #[arg(long)]
         tags: Option<String>,
-        /// Importance (1-10)
-        #[arg(short, long)]
-        importance: Option<u8>,
+        /// Why it matters / how to apply it
+        #[arg(long)]
+        why: Option<String>,
+        /// Where it was observed (command, issue, URL)
+        #[arg(long)]
+        source: Option<String>,
+        /// Memory type (semantic/episodic/procedural)
+        #[arg(long)]
+        memory_type: Option<String>,
+        /// Store as a general (cross-repository) memory
+        #[arg(long)]
+        general: bool,
+        /// Expiry: RFC 3339 timestamp or duration (12h, 30d, 8w)
+        #[arg(long)]
+        expires: Option<String>,
     },
 
     /// Search memories
@@ -86,10 +94,13 @@ pub async fn handle(command: MemoryCommand, json: bool) -> Result<()> {
     match command {
         MemoryCommand::Add {
             content,
-            category,
             tags,
-            importance,
-        } => handle_add(content, category, tags, importance).await,
+            why,
+            source,
+            memory_type,
+            general,
+            expires,
+        } => handle_add(content, tags, why, source, memory_type, general, expires).await,
         MemoryCommand::Search { query, mode, limit } => {
             handle_search(query, mode, limit, json).await
         }
@@ -112,9 +123,12 @@ pub async fn handle(command: MemoryCommand, json: bool) -> Result<()> {
 
 async fn handle_add(
     content: String,
-    category: Option<String>,
     tags: Option<String>,
-    importance: Option<u8>,
+    why: Option<String>,
+    source: Option<String>,
+    memory_type: Option<String>,
+    general: bool,
+    expires: Option<String>,
 ) -> Result<()> {
     let mut args = vec!["add".to_string()];
 
@@ -130,30 +144,40 @@ async fn handle_add(
 
     args.push(actual_content);
 
-    if let Some(cat) = category {
-        args.push("-c".to_string());
-        args.push(cat);
-    }
-
+    // mmry 0.14 flags (the old -c/-t/-i short flags are gone).
     if let Some(t) = tags {
-        args.push("-t".to_string());
+        args.push("--tags".to_string());
         args.push(t);
     }
-
-    if let Some(i) = importance {
-        args.push("-i".to_string());
-        args.push(i.to_string());
+    if let Some(w) = why {
+        args.push("--why".to_string());
+        args.push(w);
+    }
+    if let Some(s) = source {
+        args.push("--source".to_string());
+        args.push(s);
+    }
+    if let Some(mt) = memory_type {
+        args.push("--memory-type".to_string());
+        args.push(mt);
+    }
+    if general {
+        args.push("--general".to_string());
+    }
+    if let Some(e) = expires {
+        args.push("--expires".to_string());
+        args.push(e);
     }
 
     run_mmry(&args)
 }
 
-async fn handle_search(query: String, mode: String, limit: usize, json: bool) -> Result<()> {
+async fn handle_search(query: String, _mode: String, limit: usize, json: bool) -> Result<()> {
+    // mmry 0.14 dropped search `--mode`; the flag stays accepted for CLI
+    // compatibility but is no longer forwarded.
     let args = vec![
         "search".to_string(),
         query,
-        "--mode".to_string(),
-        mode,
         "--limit".to_string(),
         limit.to_string(),
         "--json".to_string(),
@@ -189,81 +213,28 @@ async fn handle_export(output: Option<PathBuf>, format: String, all: bool) -> Re
     }
 }
 
+/// Fetch memories via `mmry list --json` (mmry 0.14 dropped its own `export`
+/// subcommand, so agntz derives exports from the supported read path).
+async fn fetch_memories(all: bool) -> Result<Vec<serde_json::Value>> {
+    let mut args = vec!["list".to_string(), "--json".to_string()];
+    if all {
+        args.push("--all".to_string());
+    }
+    let (ok, out, err) = readout::run("mmry", &args);
+    if !ok {
+        anyhow::bail!("mmry list failed: {err}");
+    }
+    serde_json::from_str::<Vec<serde_json::Value>>(out.trim())
+        .map_err(|e| anyhow!("mmry list returned an unparseable payload: {e}"))
+}
+
 async fn export_json(output: &std::path::Path, all: bool) -> Result<()> {
-    let mut args = vec![
-        "export".to_string(),
-        "-o".to_string(),
-        output.to_string_lossy().to_string(),
-    ];
-
-    if all {
-        args.push("--all".to_string());
-    }
-
-    run_mmry(&args)?;
-    println!("Exported to {}", output.display());
-    Ok(())
-}
-
-#[derive(Deserialize)]
-struct Memory {
-    content: String,
-    category: Option<String>,
-    importance: Option<u8>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    created_at: Option<String>,
-}
-
-async fn export_markdown(output: &PathBuf, all: bool) -> Result<()> {
-    // First export to JSON, then convert
-    let temp_json = std::env::temp_dir().join("agnt_export_temp.json");
-
-    let mut args = vec![
-        "export".to_string(),
-        "-o".to_string(),
-        temp_json.to_string_lossy().to_string(),
-    ];
-
-    if all {
-        args.push("--all".to_string());
-    }
-
-    run_mmry(&args)?;
-
-    // Read and convert to markdown
-    let json_content = fs::read_to_string(&temp_json)?;
-    let memories: Vec<Memory> = serde_json::from_str(&json_content).unwrap_or_default();
-
-    let mut md = String::new();
-    md.push_str("# Memories\n\n");
-
-    // Group by category
-    let mut by_category: std::collections::HashMap<String, Vec<&Memory>> =
-        std::collections::HashMap::new();
-    for mem in &memories {
-        let cat = mem
-            .category
-            .clone()
-            .unwrap_or_else(|| "uncategorized".to_string());
-        by_category.entry(cat).or_default().push(mem);
-    }
-
-    for (category, mems) in by_category {
-        md.push_str(&format!("## {}\n\n", category));
-        for mem in mems {
-            let importance = mem
-                .importance
-                .map(|i| format!(" [i:{}]", i))
-                .unwrap_or_default();
-            md.push_str(&format!("- {}{}\n", mem.content.trim(), importance));
-        }
-        md.push('\n');
-    }
-
-    fs::write(output, &md)?;
-    fs::remove_file(&temp_json).ok();
-
+    let memories = fetch_memories(all).await?;
+    fs::write(
+        output,
+        serde_json::to_string_pretty(&memories).context("serializing memories")?,
+    )
+    .with_context(|| format!("writing {}", output.display()))?;
     println!(
         "Exported {} memories to {}",
         memories.len(),
@@ -272,39 +243,90 @@ async fn export_markdown(output: &PathBuf, all: bool) -> Result<()> {
     Ok(())
 }
 
-async fn handle_import(file: PathBuf) -> Result<()> {
-    let args = vec!["import".to_string(), file.to_string_lossy().to_string()];
+async fn export_markdown(output: &PathBuf, all: bool) -> Result<()> {
+    let memories = fetch_memories(all).await?;
 
-    run_mmry(&args)
+    let mut md = String::new();
+    md.push_str("# Memories\n\n");
+
+    // Group by memory type (mmry 0.14 replaced `category` with `memory_type`).
+    let mut by_type: std::collections::HashMap<String, Vec<&serde_json::Value>> =
+        std::collections::HashMap::new();
+    for mem in &memories {
+        let kind = mem
+            .get("memory_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("uncategorized")
+            .to_string();
+        by_type.entry(kind).or_default().push(mem);
+    }
+
+    for (kind, mems) in by_type {
+        md.push_str(&format!("## {kind}\n\n"));
+        for mem in mems {
+            let content = mem
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let tags = mem
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" [tags: {s}]"))
+                .unwrap_or_default();
+            md.push_str(&format!("- {content}{tags}\n"));
+        }
+        md.push('\n');
+    }
+
+    fs::write(output, &md).with_context(|| format!("writing {}", output.display()))?;
+    println!(
+        "Exported {} memories to {}",
+        memories.len(),
+        output.display()
+    );
+    Ok(())
+}
+
+async fn handle_import(_file: PathBuf) -> Result<()> {
+    // mmry 0.14 removed its `import` subcommand. Fail loudly instead of
+    // silently doing nothing.
+    Err(anyhow!(
+        "mmry 0.14 removed the `import` subcommand, so `agntz memory import` has no backend; add memories with `agntz memory add` instead"
+    ))
 }
 
 async fn handle_stats(json: bool) -> Result<()> {
-    let args = vec!["stats".to_string(), "--json".to_string()];
+    // mmry 0.14 removed `stats`; `doctor` is the supported store/ledger health
+    // view, so surface that instead (never a silent empty success).
     if json {
-        emit_mmry("memory/stats", args).await
+        emit_mmry(
+            "memory/stats",
+            vec!["doctor".to_string(), "--json".to_string()],
+        )
+        .await
     } else {
-        run_mmry(&["stats".to_string()])
+        run_mmry(&["doctor".to_string()])
     }
 }
 
 async fn handle_stores(json: bool) -> Result<()> {
-    // Don't use auto-store for listing stores
+    // mmry 0.14 replaced `stores list` with `repos` (known ledgers).
     if json {
-        let args = vec![
-            "stores".to_string(),
-            "list".to_string(),
-            "--json".to_string(),
-        ];
-        let (ok, out, err) = readout::run("mmry", &args);
-        readout::emit(
+        emit_mmry(
             "memory/stores",
-            ok,
-            (!ok).then(|| format!("mmry failed: {err}")),
-            readout::parse_or_text(out),
-        );
-        Ok(())
+            vec!["repos".to_string(), "--json".to_string()],
+        )
+        .await
     } else {
-        run_mmry_raw(&["stores", "list"])
+        run_mmry_raw(&["repos"])
     }
 }
 
@@ -447,18 +469,14 @@ fn detect_agent() -> Option<AgentIdentity> {
 }
 
 fn run_mmry(args: &[String]) -> Result<()> {
-    let mut full_args = Vec::new();
-
-    // Auto-detect store from repo name
-    if let Some(repo) = get_repo_name() {
-        full_args.push("--store".to_string());
-        full_args.push(repo);
-    }
-
-    full_args.extend(args.iter().cloned());
+    // mmry 0.14 dropped `--store <name>`: repository scoping is now cwd-based
+    // (the current repository identity), with an explicit `--repo <NAME>` on the
+    // read verbs. Pass args through untouched — injecting the old flag made
+    // every invocation fail at mmry's clap level.
+    let full_args: &[String] = args;
 
     let mut cmd = Command::new("mmry");
-    cmd.args(&full_args);
+    cmd.args(full_args);
 
     // Auto-identify the agent for memory attribution via env vars.
     // mmry reads MMRY_AGENT, MMRY_AGENT_KIND, and MMRY_AGENT_META.
