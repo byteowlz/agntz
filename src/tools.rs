@@ -166,6 +166,54 @@ async fn update_tool(tool: &ToolInfo) -> Result<()> {
     Ok(())
 }
 
+/// A real (cheap) invocation per tool, so doctor reports *protocol* health —
+/// binary presence alone once reported all-green while both integrations were
+/// dead against the installed tool versions. The contract is: the tool runs and
+/// returns parseable JSON when we ask for `--json`.
+fn probe_tool(binary: &str) -> Result<(), String> {
+    let args: &[&str] = match binary {
+        // Store/ledger health view (mmry 0.14).
+        "mmry" => &["doctor", "--json"],
+        // Issue listing (works in and out of a repo; --json proves the contract).
+        "trx" => &["list", "--json", "--limit", "1"],
+        // History search: an absent service is an availability problem, but a
+        // retired flag/shape fails here.
+        "hstry" => &["search", "", "--limit", "1", "--json"],
+        _ => &["--help"],
+    };
+
+    let output = Command::new(binary)
+        .args(args)
+        .output()
+        .map_err(|e| format!("failed to run {binary}: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        return Err(detail);
+    }
+
+    // Success + JSON we asked for = the installed version speaks our contract.
+    if args.contains(&"--json") {
+        return serde_json::from_str::<serde_json::Value>(stdout.trim())
+            .map(|_| ())
+            .map_err(|_| {
+                format!(
+                    "did not return JSON (protocol drift): {}",
+                    stdout.lines().next().unwrap_or("").trim()
+                )
+            });
+    }
+
+    Ok(())
+}
+
 fn handle_doctor() -> Result<()> {
     println!("Checking tool health...\n");
 
@@ -173,22 +221,34 @@ fn handle_doctor() -> Result<()> {
 
     for tool in TOOLS {
         let installed = is_installed(tool.binary);
-        let status = if installed { "OK" } else { "MISSING" };
-        let icon = if installed { "+" } else { "x" };
-
-        println!("  [{}] {}: {}", icon, tool.name, status);
-
         if !installed {
+            println!("  [x] {}: MISSING", tool.name);
             all_ok = false;
+            continue;
+        }
+
+        match probe_tool(tool.binary) {
+            Ok(()) => println!("  [+] {}: OK", tool.name),
+            Err(detail) => {
+                println!("  [x] {}: FAILED (installed, but the integration is broken)", tool.name);
+                for line in detail.lines().take(3) {
+                    println!("        {line}");
+                }
+                all_ok = false;
+            }
         }
     }
 
     println!();
 
     if all_ok {
-        println!("All tools are installed and ready.");
+        println!("All tools are installed and healthy.");
     } else {
-        println!("Some tools are missing. Install with: agntz tools install all");
+        println!(
+            "Some tools are missing or incompatible. Install with: agntz tools install all\n\
+             A tool that is installed but FAILED means the version on PATH no longer \
+             matches what agntz expects — update it (agntz tools update <tool>)."
+        );
     }
 
     Ok(())

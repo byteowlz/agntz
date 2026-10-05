@@ -321,11 +321,11 @@ pub struct Task {
 /// correlation, no bespoke graph.
 pub fn read_tasks(ctx: &AgentCtx) -> TaskSummary {
     let mut out = TaskSummary::default();
-    let resp = match run_json("trx", &["list", "--json"]) {
-        Some(v) => v,
-        None => {
+    let resp = match run_json_detailed("trx", &["list", "--json"]) {
+        Ok(v) => v,
+        Err(e) => {
             out.available = false;
-            out.error = Some("trx unavailable (not installed or no trx store)".into());
+            out.error = Some(e);
             return out;
         }
     };
@@ -385,12 +385,16 @@ pub struct Memory {
 
 /// Top memories for this repo (mmry list --json --limit N).
 pub fn read_memories(limit: usize) -> MemorySummary {
+    // `limit` is retained in the signature for callers, but mmry 0.14's `list`
+    // has no --limit flag, so it is not forwarded.
+    let _ = limit;
     let mut out = MemorySummary::default();
-    let resp = match run_json("mmry", &["ls", "--json", "--limit", &limit.to_string()]) {
-        Some(v) => v,
-        None => {
+    // mmry 0.14's `list` has no --limit.
+    let resp = match run_json_detailed("mmry", &["ls", "--json"]) {
+        Ok(v) => v,
+        Err(e) => {
             out.available = false;
-            out.error = Some("mmry unavailable (not installed)".into());
+            out.error = Some(e);
             return out;
         }
     };
@@ -776,14 +780,31 @@ fn clip(s: &str, n: usize) -> String {
 
 /// Run a tool expecting JSON on stdout; returns its stdout parsed as JSON, or
 /// None if the tool is missing or fails. Never panics.
-fn run_json(tool: &str, args: &[&str]) -> Option<serde_json::Value> {
-    let out = Command::new(tool).args(args).output().ok()?;
+/// Like [`run_json`], but distinguishes "binary missing" from "ran and failed",
+/// so degradation messages name the real cause instead of "not installed".
+fn run_json_detailed(tool: &str, args: &[&str]) -> Result<serde_json::Value, String> {
+    let out = match Command::new(tool).args(args).output() {
+        Ok(o) => o,
+        Err(_) => return Err(format!("{tool} not installed")),
+    };
     if !out.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        };
+        return Err(format!(
+            "{tool} failed: {}",
+            detail.lines().next().unwrap_or("").trim()
+        ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(stdout.trim()).ok()
+    serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("{tool} returned an unparseable payload: {e}"))
 }
+
 
 #[cfg(test)]
 mod tests {

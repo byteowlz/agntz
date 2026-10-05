@@ -341,11 +341,61 @@ fn sync_wiki(dir: &Path, repo: &RepoConfig) -> Result<()> {
 fn scan_pages(dir: &Path) -> Result<Vec<Page>> {
     let root = dir.join("pages");
     let mut out = Vec::new();
-    if !root.is_dir() {
-        return Ok(out);
+    if root.is_dir() {
+        walk_pages(&root, &root, &mut out)?;
     }
-    walk_pages(&root, &root, &mut out)?;
+
+    // Many real wikis keep pages at the repository root in topical directories
+    // instead of under `pages/` (agntz's own convention). Scan the repo root
+    // too — excluding VCS/meta dirs and repo-meta files — so those pages are
+    // first-class for read/search/validate. `pages/` ids win on a clash.
+    let seen: std::collections::HashSet<String> =
+        out.iter().map(|p| p.id.clone()).collect();
+    let mut root_pages = Vec::new();
+    walk_root_pages(dir, dir, &seen, &mut root_pages)?;
+    out.extend(root_pages);
     Ok(out)
+}
+
+/// Walk a root-layout wiki (pages anywhere under the repo except `pages/`,
+/// `.git` and other dot-directories).
+fn walk_root_pages(
+    root: &Path,
+    current: &Path,
+    skip: &std::collections::HashSet<String>,
+    out: &mut Vec<Page>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)
+        .with_context(|| format!("reading {}", current.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name.starts_with('.') || name == "pages" {
+                continue;
+            }
+            walk_root_pages(root, &path, skip, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Repo-meta files at the ROOT level are not wiki pages.
+            if !rel.contains('/') && matches!(rel.as_str(), "AGENTS.md" | "README.md") {
+                continue;
+            }
+            let id = rel.trim_end_matches(".md").to_string();
+            if skip.contains(&id) {
+                continue;
+            }
+            if let Ok(page) = parse_page(&path, &id, &rel) {
+                out.push(page);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Normalize a page id supplied by the user: tolerate a leading `pages/` prefix
@@ -897,7 +947,13 @@ fn handle_validate(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     }
 
     if broken.is_empty() {
-        println!("All links resolved ({} pages).", pages.len());
+        if pages.is_empty() {
+            // An empty wiki trivially has "no broken links" — say so plainly
+            // instead of a hollow success.
+            println!("No pages in wiki; nothing to validate.");
+        } else {
+            println!("All links resolved ({} pages).", pages.len());
+        }
     } else {
         for (from, target) in &broken {
             println!("BROKEN  {from} -> {target}");
