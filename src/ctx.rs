@@ -25,7 +25,7 @@ use crate::gvnr;
 ///
 /// Every field is optional except the contract floor (VERSION/HARNESS/RUN_MODE)
 /// meaning "AGENT_CTX is enabled". Missing = this layer is absent; we tolerate.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AgentCtx {
     /// Contract version (AGENT_CTX_VERSION), when AGENT_CTX is enabled.
     pub version: Option<String>,
@@ -35,7 +35,7 @@ pub struct AgentCtx {
     pub lineage: Lineage,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Lineage {
     pub platform_session_id: Option<String>,
     pub harness_session_id: Option<String>,
@@ -124,7 +124,7 @@ fn read_agent_ctx_from(env: &dyn Fn(&str) -> Option<String>) -> AgentCtx {
 /// Automatic provenance for durable entries (board messages, wiki pages).
 /// Derived from [`AGENT_CTX`] so every artifact is traceable to the agent,
 /// session, host and workspace that produced it — without manual stamping.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     /// Harness / harness name (e.g. "pi", "opencode").
     pub agent: String,
@@ -292,11 +292,11 @@ impl AgentCtx {
 // an error that aborts the whole snapshot.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub available: bool,
     pub error: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub open: Vec<Task>,
     /// How many open tasks name this agent's session / workspace (lineage).
     pub involving_self: usize,
@@ -367,11 +367,11 @@ pub fn read_tasks(ctx: &AgentCtx) -> TaskSummary {
     out
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MemorySummary {
     pub available: bool,
     pub error: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub top: Vec<Memory>,
 }
 
@@ -433,11 +433,11 @@ fn finish_memories(items: Vec<Memory>, mut out: MemorySummary) -> MemorySummary 
     out
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct HistorySummary {
     pub available: bool,
     pub error: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub recent: Vec<HistoryHit>,
 }
 
@@ -537,9 +537,9 @@ pub fn read_history(limit: usize, workspace: &str) -> HistorySummary {
 // Snapshot assembly
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CtxSnapshot {
-    pub schema: &'static str,
+    pub schema: String,
     pub version: u32,
     pub captured_at: String,
     pub agent: AgentCtx,
@@ -549,7 +549,7 @@ pub struct CtxSnapshot {
     pub open_problems: OpenProblems,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: Option<String>,
     pub path: Option<String>,
@@ -557,23 +557,23 @@ pub struct Workspace {
     pub repo: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OperativeMemory {
     pub tasks: TaskSummary,
     pub memories: MemorySummary,
     pub history: HistorySummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct OpenProblems {
     pub snapshot_capture: SnapshotProblem,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotProblem {
-    pub status: &'static str,
-    pub note: &'static str,
-    pub next_diagnostic: &'static str,
+    pub status: String,
+    pub note: String,
+    pub next_diagnostic: String,
 }
 
 fn workspace(ctx: &AgentCtx) -> Workspace {
@@ -616,7 +616,7 @@ pub fn snapshot(include_fleet: bool) -> CtxSnapshot {
     let fleet = gvnr::fleet_view(include_fleet);
 
     CtxSnapshot {
-        schema: "agntz.ctx",
+        schema: "agntz.ctx".to_string(),
         version: 1,
         captured_at: Utc::now().to_rfc3339(),
         agent: ctx,
@@ -629,15 +629,25 @@ pub fn snapshot(include_fleet: bool) -> CtxSnapshot {
         fleet,
         open_problems: OpenProblems {
             snapshot_capture: SnapshotProblem {
-                status: "open",
-                note: "snapshot capture is an open design problem; not shipped",
-                next_diagnostic: "instrument AGENT_CTX lineage (session/workspace/machine) on the three stores, then diff two ctx captures to see which fields survive an agent lifetime",
+                status: "open".to_string(),
+                note: "snapshot capture is an open design problem; not shipped".to_string(),
+                next_diagnostic: "instrument AGENT_CTX lineage (session/workspace/machine) on the three stores, then diff two ctx captures to see which fields survive an agent lifetime".to_string(),
             },
         },
     }
 }
 
-/// Public entry point for `agntz ctx`. Prints text (or JSON with --json).
+/// Version token for a file: its mtime (e.g. `.trx/issues.jsonl`).
+fn file_mtime_token(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_nanos().to_string())
+}
+
+#[allow(dead_code)]
 pub fn handle(include_fleet: bool, json: bool) -> Result<()> {
     let snap = snapshot(include_fleet);
     if json {
@@ -646,6 +656,53 @@ pub fn handle(include_fleet: bool, json: bool) -> Result<()> {
         print_text(&snap);
     }
     Ok(())
+}
+
+/// [`handle`] with the rendered output cached (the snapshot fans out to mmry,
+/// trx, hstry and optionally gvnr on every call). Cached under `agntz/cache/ctx`
+/// keyed by cwd + mode, with the trx ledger mtime as the version token and a
+/// TTL for the stores that lack one. `--refresh` recomputes.
+pub fn handle_cached(
+    include_fleet: bool,
+    json: bool,
+    refresh: bool,
+    _ctx: &crate::RuntimeContext,
+) -> Result<()> {
+    const NS: &str = "ctx";
+    const TTL: i64 = 300;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let key = format!("{}|fleet={}|json={}", cwd.display(), include_fleet, json);
+    let version = file_mtime_token(&cwd.join(".trx").join("issues.jsonl"));
+
+    if !refresh
+        && let Some(payload) = crate::cache::get(NS, &key, TTL, &version, false)
+        && let Some(snap_json) = payload.get("snapshot").and_then(|v| v.as_str())
+        && let Ok(snap) = serde_json::from_str::<CtxSnapshot>(snap_json)
+    {
+        emit_snapshot(&snap, json);
+        return Ok(());
+    }
+
+    let snap = snapshot(include_fleet);
+    let snap_json = serde_json::to_string(&snap)?;
+    crate::cache::put(
+        NS,
+        &key,
+        &serde_json::json!({ "snapshot": snap_json }),
+        TTL,
+        &version,
+    );
+    emit_snapshot(&snap, json);
+    Ok(())
+}
+
+/// Print (text) or emit (JSON) a snapshot.
+fn emit_snapshot(snap: &CtxSnapshot, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(snap).unwrap_or_default());
+    } else {
+        print_text(snap);
+    }
 }
 
 fn print_text(s: &CtxSnapshot) {
@@ -805,7 +862,6 @@ fn run_json_detailed(tool: &str, args: &[&str]) -> Result<serde_json::Value, Str
         .map_err(|e| format!("{tool} returned an unparseable payload: {e}"))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,5 +927,21 @@ mod tests {
             ctx.bags.get("harness").and_then(|m| m.get("RUN_MODE")),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_serde_tests {
+    use super::*;
+
+    /// The ctx cache stores the snapshot as JSON and deserializes it on a hit;
+    /// a shape that fails to round-trip would silently disable the cache.
+    #[test]
+    fn snapshot_roundtrips_through_serde() {
+        let snap = snapshot(false);
+        let json = serde_json::to_string(&snap).expect("serialize snapshot");
+        let back: CtxSnapshot = serde_json::from_str(&json).expect("deserialize snapshot");
+        assert_eq!(back.schema, snap.schema);
+        assert_eq!(back.captured_at, snap.captured_at);
     }
 }

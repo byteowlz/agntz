@@ -230,7 +230,10 @@ fn handle_doctor() -> Result<()> {
         match probe_tool(tool.binary) {
             Ok(()) => println!("  [+] {}: OK", tool.name),
             Err(detail) => {
-                println!("  [x] {}: FAILED (installed, but the integration is broken)", tool.name);
+                println!(
+                    "  [x] {}: FAILED (installed, but the integration is broken)",
+                    tool.name
+                );
                 for line in detail.lines().take(3) {
                     println!("        {line}");
                 }

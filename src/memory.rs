@@ -11,6 +11,7 @@ pub enum MemoryCommand {
     /// Add a memory
     Add {
         /// Memory content (or - for stdin)
+        #[arg(allow_hyphen_values = true)]
         content: String,
         /// Tags (comma-separated)
         #[arg(long)]
@@ -35,6 +36,7 @@ pub enum MemoryCommand {
     /// Search memories
     Search {
         /// Search query
+        #[arg(allow_hyphen_values = true)]
         query: String,
         /// Search mode
         #[arg(short, long, default_value = "hybrid")]
@@ -142,9 +144,9 @@ async fn handle_add(
         content
     };
 
-    args.push(actual_content);
-
-    // mmry 0.14 flags (the old -c/-t/-i short flags are gone).
+    // mmry 0.14 flags (the old -c/-t/-i short flags are gone). Flags first,
+    // then `--` and the content, so leading-dash content is safe (pi-mmry
+    // convention).
     if let Some(t) = tags {
         args.push("--tags".to_string());
         args.push(t);
@@ -168,6 +170,8 @@ async fn handle_add(
         args.push("--expires".to_string());
         args.push(e);
     }
+    args.push("--".to_string());
+    args.push(actual_content);
 
     run_mmry(&args)
 }
@@ -177,10 +181,11 @@ async fn handle_search(query: String, _mode: String, limit: usize, json: bool) -
     // compatibility but is no longer forwarded.
     let args = vec![
         "search".to_string(),
-        query,
+        "--json".to_string(),
         "--limit".to_string(),
         limit.to_string(),
-        "--json".to_string(),
+        "--".to_string(),
+        query,
     ];
 
     if json {

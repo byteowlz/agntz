@@ -241,7 +241,12 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
 }
 
 /// Resolve the board repo to operate on, honoring flag > env > config.
-fn resolve_repo<'a>(ctx: &'a RuntimeContext, name: Option<&'a str>) -> Result<&'a RepoConfig> {
+pub(crate) fn resolve_repo<'a>(
+    ctx: &'a RuntimeContext,
+    name: Option<&'a str>,
+) -> Result<&'a RepoConfig> {
+    // (public within the crate so `agntz find` can resolve the default repo)
+
     let env = std::env::var("AGNTZ_BOARD").ok();
     select_repo(
         &ctx.config.board.repos,
@@ -1032,6 +1037,49 @@ fn short_id(id: &str) -> String {
 /// Normalize a Message-ID for comparison: trim whitespace and strip RFC5322
 /// angle brackets, so `<id>` (as it appears on the wire / in some clients) and
 /// the bare id are the same key everywhere (read/reply/ack/--since).
+/// A board hit for the unified `find` surface.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct BoardHit {
+    pub(crate) id: String,
+    pub(crate) topic: String,
+    pub(crate) subject: String,
+    pub(crate) sent_at: Option<String>,
+    pub(crate) path: String,
+}
+
+/// Case-insensitive search over board messages (id, topic, subject, body).
+pub(crate) fn search_messages(dir: &Path, query: &str, limit: usize) -> Result<Vec<BoardHit>> {
+    let q = query.to_ascii_lowercase();
+    let mut messages = scan_messages(dir)?;
+    sort_messages(&mut messages);
+    let mut hits = Vec::new();
+    for m in messages {
+        if hits.len() >= limit {
+            break;
+        }
+        let subject = m.subject().unwrap_or("").to_string();
+        let matched = m.id.to_ascii_lowercase().contains(&q)
+            || m.topic.to_ascii_lowercase().contains(&q)
+            || subject.to_ascii_lowercase().contains(&q)
+            || m.body.to_ascii_lowercase().contains(&q);
+        if !matched {
+            continue;
+        }
+        let id = m.id.clone();
+        let topic = m.topic.clone();
+        let path = m.path.to_string_lossy().to_string();
+        let sent_at = m.sent_at().map(str::to_string);
+        hits.push(BoardHit {
+            id,
+            topic,
+            subject,
+            sent_at,
+            path,
+        });
+    }
+    Ok(hits)
+}
+
 fn normalize_message_id(id: &str) -> String {
     id.trim()
         .trim_start_matches('<')
@@ -2052,4 +2100,12 @@ Body.
         );
         assert_eq!(normalize_datetime("bogus"), "bogus");
     }
+}
+
+/// Alias used by `agntz find` (avoids relying on the private name).
+pub(crate) fn resolve_repo_pub<'a>(
+    ctx: &'a crate::RuntimeContext,
+    name: Option<&'a str>,
+) -> Result<&'a agntz::config::RepoConfig> {
+    resolve_repo(ctx, name)
 }

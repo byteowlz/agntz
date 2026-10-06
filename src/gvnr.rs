@@ -9,13 +9,13 @@
 //! is missing, `fleet_view` returns `available: false` with a reason. It never
 //! blocks the orientation snapshot, and it never invents fleet truth.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
 /// A fleet runner as declared by a registered heartbeat (registry fact).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Runner {
     pub runner_id: String,
     pub mesh_ip: String,
@@ -27,7 +27,7 @@ pub struct Runner {
 }
 
 /// Result of resolving this agent's own id on the fleet, if any.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfResolved {
     pub id: String,
     pub found: bool,
@@ -36,7 +36,7 @@ pub struct SelfResolved {
 }
 
 /// Read-only fleet view.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct FleetView {
     pub available: bool,
     /// Human reason when the fleet is not reachable / not configured.

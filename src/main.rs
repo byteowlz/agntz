@@ -5,7 +5,9 @@
 //! hstry, skdlr) behind a stable unified `--json` surface.
 
 mod board;
+mod cache;
 mod ctx;
+mod find;
 mod gitx;
 mod gvnr;
 mod issues;
@@ -50,7 +52,7 @@ struct Cli {
 }
 
 /// Common global options shared across all subcommands.
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct CommonOpts {
     /// Override the config file path.
     #[arg(
@@ -120,9 +122,10 @@ pub struct CommonOpts {
 }
 
 /// Color output mode.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum ColorOption {
     /// Detect terminal capabilities automatically.
+    #[default]
     Auto,
     /// Always emit ANSI color codes.
     Always,
@@ -147,6 +150,30 @@ enum Commands {
 
     /// Show unblocked tasks.
     Ready,
+
+    /// Search every store (hstry, mmry, trx, wiki, board, git) at once.
+    Find {
+        /// Search query.
+        query: String,
+        /// Comma-separated sources (hstry,mmry,trx,wiki,board,git). Default: all.
+        #[arg(long, value_delimiter = ',')]
+        source: Vec<String>,
+        /// Max hits per source.
+        #[arg(long, default_value = "5")]
+        limit: usize,
+        /// Also search git history (git log -S; slower).
+        #[arg(long)]
+        git_history: bool,
+        /// Ignore cached results and recompute.
+        #[arg(long)]
+        refresh: bool,
+        /// Do not read or write the cache.
+        #[arg(long)]
+        no_cache: bool,
+        /// Cache TTL in seconds.
+        #[arg(long, default_value_t = 300)]
+        ttl: i64,
+    },
 
     /// Search agent session history.
     Search {
@@ -195,6 +222,9 @@ enum Commands {
         /// Include the fleet view (gvnr resolve/list over the wire).
         #[arg(long)]
         gvnr: bool,
+        /// Ignore the cached snapshot and recompute.
+        #[arg(long)]
+        refresh: bool,
     },
 
     /// Run the ONE-tool MCP server (unified agent surface).
@@ -352,6 +382,29 @@ async fn dispatch(command: Commands, ctx: &RuntimeContext) -> Result<()> {
         Commands::Memory { command } => memory::handle(command, ctx.common.json).await,
         Commands::Tasks { command } => issues::handle(command, ctx.common.json).await,
         Commands::Ready => handle_ready(ctx).await,
+        Commands::Find {
+            query,
+            source,
+            limit,
+            git_history,
+            refresh,
+            no_cache,
+            ttl,
+        } => {
+            find::handle(
+                find::FindCommand::Find {
+                    query,
+                    source,
+                    limit,
+                    git_history,
+                    refresh,
+                    no_cache,
+                    ttl,
+                },
+                ctx.common.json,
+            )
+            .await
+        }
         Commands::Search {
             query,
             workspace,
@@ -381,7 +434,7 @@ async fn dispatch(command: Commands, ctx: &RuntimeContext) -> Result<()> {
         Commands::Schedule { command } => {
             schedule::handle(command, ctx.common.json, ctx.common.assume_yes).await
         }
-        Commands::Ctx { gvnr } => ctx::handle(gvnr, ctx.common.json),
+        Commands::Ctx { gvnr, refresh } => ctx::handle_cached(gvnr, ctx.common.json, refresh, ctx),
         Commands::Mcp => {
             mcp::run().await?;
             Ok(())
@@ -641,7 +694,7 @@ fn compact_snippet(snippet: &str, max_len: usize) -> String {
     collapsed
 }
 
-fn compact_label(value: &str, max_len: usize) -> String {
+pub(crate) fn compact_label(value: &str, max_len: usize) -> String {
     if value.len() <= max_len {
         return value.to_string();
     }
