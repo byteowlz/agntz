@@ -179,14 +179,23 @@ async fn handle_add(
 async fn handle_search(query: String, _mode: String, limit: usize, json: bool) -> Result<()> {
     // mmry 0.14 dropped search `--mode`; the flag stays accepted for CLI
     // compatibility but is no longer forwarded.
-    let args = vec![
-        "search".to_string(),
-        "--json".to_string(),
-        "--limit".to_string(),
-        limit.to_string(),
-        "--".to_string(),
-        query,
-    ];
+    // mmry's human search output is readable; only forward --json when the
+    // caller asked for the envelope (the text path used to leak raw JSON).
+    let json_flag = if json {
+        vec!["--json".to_string()]
+    } else {
+        vec![]
+    };
+    let args = [
+        vec![
+            "search".to_string(),
+            "--limit".to_string(),
+            limit.to_string(),
+        ],
+        json_flag,
+        vec!["--".to_string(), query.to_string()],
+    ]
+    .concat();
 
     if json {
         emit_mmry("memory/search", args).await

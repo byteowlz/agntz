@@ -20,7 +20,7 @@ pub enum IssuesCommand {
         /// Issue title
         title: String,
         /// Issue type (bug, feature, task, epic, chore)
-        #[arg(short = 'T', long, default_value = "task")]
+        #[arg(short = 't', long, default_value = "task")]
         r#type: String,
         /// Priority (0-4, default 2)
         #[arg(short, long, default_value = "2")]

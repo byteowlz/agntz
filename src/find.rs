@@ -372,10 +372,11 @@ async fn find_hstry(query: &str, limit: usize) -> (SourceResult, Value) {
 async fn find_mmry(query: &str, limit: usize) -> (SourceResult, Value) {
     let args = vec![
         "search".to_string(),
-        query.to_string(),
         "--json".to_string(),
         "--limit".to_string(),
         limit.to_string(),
+        "--".to_string(),
+        query.to_string(),
     ];
     match run_capture("mmry", &args) {
         Ok((true, out, _)) => {
@@ -723,7 +724,7 @@ fn render_row(source: &str, row: &Value) -> String {
         "mmry" => format!(
             "{} {}",
             get("id"),
-            crate::compact_label(&get("content"), 140)
+            agntz::clip_to_words(&get("content"), 140)
         ),
         "trx" => format!(
             "{} [P{}] {} ({})",

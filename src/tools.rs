@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
+use serde_json::{Value, json};
 use std::process::Command;
 
 #[derive(Subcommand)]
@@ -51,31 +52,39 @@ const TOOLS: &[ToolInfo] = &[
     },
 ];
 
-pub async fn handle(command: ToolsCommand) -> Result<()> {
+pub async fn handle(command: ToolsCommand, json: bool) -> Result<()> {
     match command {
-        ToolsCommand::List => handle_list(),
+        ToolsCommand::List => handle_list(json),
         ToolsCommand::Install { tool } => handle_install(&tool).await,
         ToolsCommand::Update { tool } => handle_update(&tool).await,
-        ToolsCommand::Doctor => handle_doctor(),
+        ToolsCommand::Doctor => handle_doctor(json),
     }
 }
 
-fn handle_list() -> Result<()> {
-    println!("Available tools:\n");
-
-    for tool in TOOLS {
-        let installed = is_installed(tool.binary);
-        let status = if installed {
-            "[installed]"
-        } else {
-            "[not installed]"
-        };
-        println!("  {} {} - {}", tool.name, status, tool.description);
+fn handle_list(json: bool) -> Result<()> {
+    if json {
+        let tools: Vec<Value> = TOOLS
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "binary": t.binary,
+                    "installed": is_installed(t.binary),
+                })
+            })
+            .collect();
+        crate::readout::emit("tools/list", true, None, json!({ "tools": tools }));
+        return Ok(());
     }
-
-    println!("\nInstall with: agntz tools install <name>");
-    println!("Install all:  agntz tools install all");
-
+    println!("Available tools:\n");
+    for tool in TOOLS {
+        let installed = if is_installed(tool.binary) { "+" } else { "x" };
+        println!(
+            "  [{installed}] {}: {} (install: {})",
+            tool.name, tool.description, tool.install_cmd
+        );
+    }
     Ok(())
 }
 
@@ -214,34 +223,64 @@ fn probe_tool(binary: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_doctor() -> Result<()> {
-    println!("Checking tool health...\n");
-
+fn handle_doctor(json: bool) -> Result<()> {
+    let mut results: Vec<Value> = Vec::new();
     let mut all_ok = true;
 
     for tool in TOOLS {
         let installed = is_installed(tool.binary);
-        if !installed {
-            println!("  [x] {}: MISSING", tool.name);
+        let (status, detail) = if !installed {
             all_ok = false;
-            continue;
-        }
-
-        match probe_tool(tool.binary) {
-            Ok(()) => println!("  [+] {}: OK", tool.name),
-            Err(detail) => {
-                println!(
-                    "  [x] {}: FAILED (installed, but the integration is broken)",
-                    tool.name
-                );
-                for line in detail.lines().take(3) {
-                    println!("        {line}");
+            ("MISSING".to_string(), "not found on PATH".to_string())
+        } else {
+            match probe_tool(tool.binary) {
+                Ok(()) => ("OK".to_string(), String::new()),
+                Err(detail) => {
+                    all_ok = false;
+                    ("FAILED".to_string(), detail)
                 }
-                all_ok = false;
+            }
+        };
+        results.push(json!({
+            "name": tool.name,
+            "binary": tool.binary,
+            "status": status,
+            "installed": installed,
+            "detail": detail,
+        }));
+    }
+
+    if json {
+        crate::readout::emit(
+            "tools/doctor",
+            all_ok,
+            (!all_ok).then(|| "one or more tools are missing or incompatible".to_string()),
+            json!({ "tools": results, "healthy": all_ok }),
+        );
+        // Unhealthy tooling must not exit 0: automation keys off the exit code.
+        return if all_ok {
+            Ok(())
+        } else {
+            anyhow::bail!("tool health check failed")
+        };
+    }
+
+    println!("Checking tool health...\n");
+    for r in &results {
+        let ok = r["status"] == "OK";
+        let icon = if ok { "+" } else { "x" };
+        let name = r["name"].as_str().unwrap_or("?");
+        let status = r["status"].as_str().unwrap_or("?");
+        println!("  [{icon}] {name}: {status}");
+        if let Some(d) = r["detail"].as_str()
+            && !d.is_empty()
+            && !ok
+        {
+            for line in d.lines().take(3) {
+                println!("        {line}");
             }
         }
     }
-
     println!();
 
     if all_ok {
@@ -252,8 +291,9 @@ fn handle_doctor() -> Result<()> {
              A tool that is installed but FAILED means the version on PATH no longer \
              matches what agntz expects — update it (agntz tools update <tool>)."
         );
+        // Unhealthy tooling must not exit 0 (sixth-review P1-3).
+        anyhow::bail!("tool health check failed");
     }
-
     Ok(())
 }
 

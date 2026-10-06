@@ -430,7 +430,7 @@ async fn dispatch(command: Commands, ctx: &RuntimeContext) -> Result<()> {
             )
             .await
         }
-        Commands::Tools { command } => tools::handle(command).await,
+        Commands::Tools { command } => tools::handle(command, ctx.common.json).await,
         Commands::Schedule { command } => {
             schedule::handle(command, ctx.common.json, ctx.common.assume_yes).await
         }
@@ -441,7 +441,7 @@ async fn dispatch(command: Commands, ctx: &RuntimeContext) -> Result<()> {
         }
         Commands::Completions { shell } => handle_completions(shell),
         Commands::Init { force } => handle_init(force, ctx).await,
-        Commands::Board { command } => board::handle(command, ctx),
+        Commands::Board { command } => board::handle(command, ctx).await,
         Commands::Wiki { command } => wiki::handle(command, ctx),
         Commands::Config { command } => handle_config(ctx, command),
     }
@@ -749,6 +749,15 @@ fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
             Ok(())
         }
         ConfigCommand::Reset => {
+            // Guard: reset regenerates the file and silently drops the
+            // board/wiki registry (data loss with no confirmation).
+            let registered = ctx.config.board.repos.len() + ctx.config.wiki.repos.len();
+            if registered > 0 && !ctx.common.assume_yes {
+                anyhow::bail!(
+                    "reset would drop {registered} registered board/wiki ent{}; re-run with --yes to confirm",
+                    if registered == 1 { "y" } else { "ies" }
+                );
+            }
             if ctx.common.dry_run {
                 log::info!(
                     "dry-run: would reset config at {}",

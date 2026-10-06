@@ -89,6 +89,40 @@ pub enum BoardCommand {
         idempotency_key: Option<String>,
     },
 
+    /// Post a root message: opens a topic without needing a parent message,
+    /// so a fresh board is usable from the CLI alone.
+    Post {
+        /// Topic slug to open.
+        topic: String,
+        /// Path to the body file, or `-` for stdin.
+        #[arg(long, default_value = "-")]
+        body_file: String,
+        /// Inline message body (alternative to --body-file).
+        #[arg(long)]
+        body: Option<String>,
+        /// Optional subject line.
+        #[arg(long)]
+        subject: Option<String>,
+        /// Recipient role (default: all).
+        #[arg(long)]
+        to: Option<String>,
+        /// Select a named board repository.
+        #[arg(long)]
+        name: Option<String>,
+        /// Override the sender role.
+        #[arg(long)]
+        role: Option<String>,
+        /// Show the prepared message without committing/pushing.
+        #[arg(long)]
+        preview: bool,
+        /// Commit but skip the push (local-only publication).
+        #[arg(long)]
+        no_push: bool,
+        /// Idempotency key: reuse the same Message-ID on a retry.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+
     /// Show local-vs-remote publication state.
     Status {
         /// Select a named board repository.
@@ -170,7 +204,7 @@ pub enum BoardCommand {
 /// # Errors
 ///
 /// Returns an error on any underlying failure.
-pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
+pub async fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
     match command {
         BoardCommand::Topics { name } => handle_topics(ctx, name.as_deref()),
         BoardCommand::Inbox {
@@ -206,6 +240,33 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             new_topic.as_deref(),
             idempotency_key.as_deref(),
         ),
+        BoardCommand::Post {
+            topic,
+            body_file,
+            body,
+            subject,
+            to,
+            name,
+            role,
+            preview,
+            no_push,
+            idempotency_key,
+        } => {
+            handle_post(
+                ctx,
+                name.as_deref(),
+                &topic,
+                &body_file,
+                body.as_deref(),
+                subject.as_deref(),
+                to.as_deref(),
+                role.as_deref(),
+                preview,
+                no_push,
+                idempotency_key.as_deref(),
+            )
+            .await
+        }
         BoardCommand::Status { name } => handle_status(ctx, name.as_deref()),
         BoardCommand::Ack {
             message_id,
@@ -970,6 +1031,13 @@ fn role_matches(msg: &Message, role_lower: &str) -> bool {
         return true;
     }
     let to = msg.header("To").unwrap_or("");
+    // A message addressed to "all" is a broadcast: it belongs in every inbox.
+    if to
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .any(|t| t.eq_ignore_ascii_case("all"))
+    {
+        return true;
+    }
     to.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
         .filter(|s| !s.is_empty())
         .any(|t| t.eq_ignore_ascii_case(role_lower))
@@ -1455,6 +1523,182 @@ fn handle_reply(
         eprintln!("push failed: {err}");
         eprintln!("recover by pushing manually: git push origin");
     }
+    Ok(())
+}
+
+/// Post a root message: opens a topic with In-Reply-To: none, so a fresh
+/// board is usable from the CLI alone (sixth-review P2-7).
+#[allow(clippy::too_many_arguments)]
+async fn handle_post(
+    ctx: &RuntimeContext,
+    name: Option<&str>,
+    topic: &str,
+    body_file: &str,
+    body_override: Option<&str>,
+    subject: Option<&str>,
+    to_override: Option<&str>,
+    role_override: Option<&str>,
+    preview: bool,
+    no_push: bool,
+    idempotency_key: Option<&str>,
+) -> Result<()> {
+    if topic.trim().is_empty() {
+        return Err(anyhow!("topic is required"));
+    }
+    let repo = resolve_repo(ctx, name)?;
+    let dir = PathBuf::from(&repo.path);
+    let mut sync_warning = None;
+    if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
+        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "main".to_string());
+        sync_warning = gitx::sync_for_read(&dir, "origin", &branch)?;
+    }
+    prepare_tree(&dir)?;
+    gitx::ensure_git()?;
+
+    let identity = detect_identity(role_override, repo.role.as_deref());
+    let body = match body_override {
+        Some(b) => agntz::unescape_body(b),
+        None => read_body(body_file)?,
+    };
+    if body.trim().is_empty() {
+        return Err(anyhow!("post body is empty"));
+    }
+
+    // A root post starts its own thread: the first message in the topic is the
+    // thread parent, addressed via In-Reply-To: none.
+    let synthetic = Message {
+        id: "none".to_string(),
+        topic: topic.to_string(),
+        path: PathBuf::new(),
+        headers: {
+            let mut h = std::collections::HashMap::new();
+            h.insert("From".to_string(), to_override.unwrap_or("all").to_string());
+            h
+        },
+        body: String::new(),
+    };
+
+    let (id, now) = resolve_reply_identity(ctx, repo, idempotency_key, "none")?;
+    let stamp = timestamp_name(now);
+    let topic_slug = slugify(topic);
+    let topic_dir = dir.join("topics").join(&topic_slug);
+    let file_path = topic_dir.join(format!("{stamp}-{id}.txt"));
+
+    let message = build_message(
+        &identity,
+        &synthetic,
+        synthetic.header("From").unwrap_or("all"),
+        subject,
+        &id,
+        &now,
+        &body,
+    );
+    validate_message(&message)?;
+
+    // Idempotent retry: if this Message-ID already exists on the board, it was
+    // published earlier; report success without creating a duplicate.
+    if idempotency_key.is_some() && message_id_present(&dir, &id)? {
+        if ctx.common.json {
+            readout::emit(
+                "board/post",
+                true,
+                None,
+                serde_json::json!({
+                    "repo": repo.name,
+                    "message_id": id,
+                    "topic": topic_slug,
+                    "path": file_path.to_string_lossy(),
+                    "published": true,
+                    "idempotent": true,
+                    "already_published": true,
+                    "sync_warning": sync_warning,
+                }),
+            );
+        } else {
+            surface_sync_warning(&sync_warning);
+            println!("Already published (idempotent): {id}");
+            println!("  topic:   {topic_slug}");
+            println!("  state:   already published (no duplicate created)");
+        }
+        return Ok(());
+    }
+
+    if preview {
+        if ctx.common.json {
+            readout::emit(
+                "board/post-preview",
+                true,
+                None,
+                serde_json::json!({
+                    "repo": repo.name,
+                    "path": file_path.to_string_lossy(),
+                    "message_id": id,
+                    "message": message,
+                }),
+            );
+        } else {
+            println!("{message}");
+        }
+        return Ok(());
+    }
+
+    if ctx.common.dry_run {
+        log::info!("dry-run: would write {}", file_path.display());
+        return Ok(());
+    }
+
+    fs::create_dir_all(&topic_dir).with_context(|| format!("creating {}", topic_dir.display()))?;
+    fs::write(&file_path, &message).with_context(|| format!("writing {}", file_path.display()))?;
+    let rel = relpath(&dir, &file_path);
+    gitx::ensure_identity(&dir)?;
+    gitx::add_one(&dir, &rel)?;
+    gitx::commit(&dir, &format!("board: post new topic {topic_slug}"))?;
+
+    let mut published = false;
+    let mut push_error = None;
+    if !no_push && repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
+        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "main".to_string());
+        match push_with_race_retry(&dir, &branch) {
+            Ok(()) => published = true,
+            Err(e) => push_error = Some(format!("{e:#}")),
+        }
+    }
+
+    if ctx.common.json {
+        readout::emit(
+            "board/post",
+            true,
+            None,
+            serde_json::json!({
+                "repo": repo.name,
+                "message_id": id,
+                "topic": topic_slug,
+                "path": file_path.to_string_lossy(),
+                "published": published,
+                "push_error": push_error,
+                "sync_warning": sync_warning,
+            }),
+        );
+        return Ok(());
+    }
+
+    surface_sync_warning(&sync_warning);
+    println!("Posted to new topic:");
+    println!("  Message-ID: {id}");
+    println!("  topic: {topic_slug}");
+    println!("  path: {}", file_path.display());
+    println!(
+        "  state: {}",
+        if published {
+            "remotely published"
+        } else if no_push {
+            "locally committed (--no-push)"
+        } else if push_error.is_some() {
+            "locally committed, push failed (recoverable)"
+        } else {
+            "locally committed (local-only repo)"
+        }
+    );
     Ok(())
 }
 

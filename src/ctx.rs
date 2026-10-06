@@ -451,88 +451,97 @@ pub struct HistoryHit {
     pub workspace: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct HstryEnvelope<T> {
-    ok: bool,
-    result: Option<T>,
-    error: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawHit {
-    conversation_id: String,
-    external_id: Option<String>,
-    role: String,
-    title: Option<String>,
-    snippet: String,
-    created_at: Option<String>,
-    workspace: Option<String>,
-}
-
 /// Most recent session history touching this workspace (hstry search, service
 /// or local). Best-effort: an unreachable service → unavailable, not fatal.
 pub fn read_history(limit: usize, workspace: &str) -> HistorySummary {
     let mut out = HistorySummary::default();
 
-    let mut args = vec!["search".to_string(), "".to_string(), "--json".to_string()];
-    args.push("--limit".to_string());
-    args.push(limit.to_string());
-    args.push("--workspace".to_string());
-    args.push(workspace.to_string());
+    let mut args = vec![
+        "search".to_string(),
+        "".to_string(),
+        "--json".to_string(),
+        "--limit".to_string(),
+        limit.to_string(),
+    ];
+    if !workspace.is_empty() {
+        args.push("--workspace".to_string());
+        args.push(workspace.to_string());
+    }
 
-    let output = Command::new("hstry")
-        .args(&args)
-        .output()
-        .map_err(|e| e.to_string())
-        .ok();
-
-    let raw = match output {
-        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        Some(_) => {
-            out.available = false;
-            out.error = Some("hstry search failed".into());
-            return out;
-        }
-        None => {
-            out.available = false;
-            out.error = Some("hstry unavailable (not installed or service down)".into());
-            return out;
-        }
+    let (resp, err) = match run_json_detailed(
+        "hstry",
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    ) {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e)),
     };
-
-    let envelope: HstryEnvelope<Vec<RawHit>> = match serde_json::from_str(&raw) {
-        Ok(e) => e,
-        Err(_) => {
-            // Some hstry modes return the array directly.
-            out.available = false;
-            out.error = Some("hstry search returned an unsupported shape".into());
-            return out;
-        }
-    };
-
-    if !envelope.ok {
+    let Some(resp) = resp else {
         out.available = false;
-        out.error = envelope.error.or(Some("hstry search failed".into()));
+        out.error = err;
         return out;
+    };
+
+    // Current hstry envelope: result is an object carrying `hits`.
+    let Some(result) = resp.get("result") else {
+        out.available = false;
+        out.error = Some("hstry search returned no result".into());
+        return out;
+    };
+    let hits = result
+        .get("hits")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let hit_err = result
+        .get("warnings")
+        .and_then(|w| w.as_array())
+        .and_then(|a| a.first())
+        .and_then(|w| w.as_str())
+        .map(str::to_string);
+
+    let mut recent = Vec::new();
+    for h in hits {
+        // Map the current hit fields (readable_id/timestamp; no external_id).
+        let session_id = h
+            .get("readable_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| h.get("conversation_id").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        recent.push(HistoryHit {
+            session_id,
+            role: h
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            title: h.get("title").and_then(|v| v.as_str()).map(str::to_string),
+            snippet: h
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            created_at: h
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            workspace: None,
+        });
+    }
+
+    if recent.is_empty() {
+        // Distinguish "empty here" from "degraded" using hstry's own warnings.
+        if let Some(w) = hit_err {
+            out.available = false;
+            out.error = Some(w);
+            return out;
+        }
     }
 
     out.available = true;
-    out.recent = envelope
-        .result
-        .unwrap_or_default()
-        .into_iter()
-        .map(|h| HistoryHit {
-            session_id: h.external_id.unwrap_or(h.conversation_id),
-            role: h.role,
-            title: h.title,
-            snippet: h.snippet,
-            created_at: h.created_at,
-            workspace: h.workspace,
-        })
-        .collect();
+    out.recent = recent;
     out
 }
-
 // ---------------------------------------------------------------------------
 // Snapshot assembly
 // ---------------------------------------------------------------------------
@@ -546,7 +555,6 @@ pub struct CtxSnapshot {
     pub workspace: Workspace,
     pub operative_memory: OperativeMemory,
     pub fleet: gvnr::FleetView,
-    pub open_problems: OpenProblems,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -562,18 +570,6 @@ pub struct OperativeMemory {
     pub tasks: TaskSummary,
     pub memories: MemorySummary,
     pub history: HistorySummary,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OpenProblems {
-    pub snapshot_capture: SnapshotProblem,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SnapshotProblem {
-    pub status: String,
-    pub note: String,
-    pub next_diagnostic: String,
 }
 
 fn workspace(ctx: &AgentCtx) -> Workspace {
@@ -627,14 +623,30 @@ pub fn snapshot(include_fleet: bool) -> CtxSnapshot {
             history,
         },
         fleet,
-        open_problems: OpenProblems {
-            snapshot_capture: SnapshotProblem {
-                status: "open".to_string(),
-                note: "snapshot capture is an open design problem; not shipped".to_string(),
-                next_diagnostic: "instrument AGENT_CTX lineage (session/workspace/machine) on the three stores, then diff two ctx captures to see which fields survive an agent lifetime".to_string(),
-            },
-        },
     }
+}
+
+/// Cheap staleness signal for the mmry central store: max mtime over the
+/// general ledger and the (depth-1) repo ledgers under the store root.
+fn mmry_ledger_token() -> Option<String> {
+    let root = std::path::PathBuf::from(std::env::var("XDG_DATA_HOME").ok()?).join("mmry");
+    let mut latest: u128 = 0;
+    for entry in [root.join("general").join("mmry.jsonl"), root.join("repos")] {
+        if entry.is_file() {
+            if let Some(t) = file_mtime_token(&entry) {
+                latest = latest.max(t.parse::<u128>().unwrap_or(0));
+            }
+        } else if entry.is_dir()
+            && let Ok(ledgers) = std::fs::read_dir(&entry)
+        {
+            for l in ledgers.flatten() {
+                if let Some(t) = file_mtime_token(&l.path().join("mmry.jsonl")) {
+                    latest = latest.max(t.parse::<u128>().unwrap_or(0));
+                }
+            }
+        }
+    }
+    (latest > 0).then(|| latest.to_string())
 }
 
 /// Version token for a file: its mtime (e.g. `.trx/issues.jsonl`).
@@ -672,7 +684,13 @@ pub fn handle_cached(
     const TTL: i64 = 300;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let key = format!("{}|fleet={}|json={}", cwd.display(), include_fleet, json);
-    let version = file_mtime_token(&cwd.join(".trx").join("issues.jsonl"));
+    // Invalidate on task changes (trx ledger) AND memory changes (mmry
+    // ledgers), so a memory add refreshes the operative-memory counts.
+    let mut version = file_mtime_token(&cwd.join(".trx").join("issues.jsonl")).unwrap_or_default();
+    if let Some(mmry_tok) = mmry_ledger_token() {
+        version = format!("{version}|{mmry_tok}");
+    }
+    let version = Some(version);
 
     if !refresh
         && let Some(payload) = crate::cache::get(NS, &key, TTL, &version, false)
@@ -817,12 +835,6 @@ fn print_text(s: &CtxSnapshot) {
         );
         println!("  (start/point agntz at gvnr; fleet view is optional)");
     }
-
-    println!("\nopen problems:");
-    println!(
-        "  snapshot_capture: {} — {}",
-        s.open_problems.snapshot_capture.status, s.open_problems.snapshot_capture.note
-    );
 }
 
 fn clip(s: &str, n: usize) -> String {
