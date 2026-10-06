@@ -45,7 +45,7 @@ fn cache_dir(ns: &str) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp/agntz-cache").join(ns))
 }
 
-fn hash_key(key: &str) -> String {
+pub fn hash_key(key: &str) -> String {
     let mut h = DefaultHasher::new();
     key.hash(&mut h);
     format!("{:016x}", h.finish())

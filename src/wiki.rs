@@ -267,16 +267,16 @@ pub(crate) fn resolve_repo<'a>(
 
 /// A parsed wiki page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Page {
-    id: String,
+pub(crate) struct Page {
+    pub(crate) id: String,
     rel: String,
-    path: PathBuf,
-    title: String,
-    status: Option<String>,
-    kind: Option<String>,
+    pub(crate) path: PathBuf,
+    pub(crate) title: String,
+    pub(crate) status: Option<String>,
+    pub(crate) kind: Option<String>,
     /// Full front matter (key -> value), including provenance fields.
     front: BTreeMap<String, String>,
-    body: String,
+    pub(crate) body: String,
 }
 
 /// Parse front matter (`---` delimited) and body from a page file.
@@ -343,49 +343,206 @@ fn sync_wiki(dir: &Path, repo: &RepoConfig) -> Result<()> {
 }
 
 /// Scan all pages under the wiki's `pages/` directory.
-fn scan_pages(dir: &Path) -> Result<Vec<Page>> {
-    let root = dir.join("pages");
-    let mut out = Vec::new();
-    if root.is_dir() {
-        walk_pages(&root, &root, &mut out)?;
+/// Scan pages with an incremental index when a state dir is available.
+///
+/// Fast path: the repo is a git repo and its HEAD+dirty token matches the
+/// index -> return the cached page set without touching a single file.
+/// Incremental path: stat-walk the tree and re-read only files whose
+/// (mtime, size) changed since the index was built.
+pub(crate) fn scan_pages_cached(dir: &Path, state_dir: Option<&Path>) -> Result<Vec<Page>> {
+    let token = git_head_dirty_token(dir);
+    let index_path = state_dir.map(|sd| {
+        sd.join("cache").join("wiki-index").join(format!(
+            "{}.json",
+            crate::cache::hash_key(&dir.to_string_lossy())
+        ))
+    });
+
+    // Fast path: nothing changed since the index was built.
+    if let (Some(ip), Some(tok)) = (&index_path, &token)
+        && let Ok(raw) = std::fs::read_to_string(ip)
+        && let Ok(entry) = serde_json::from_str::<WikiIndexEntry>(&raw)
+        && entry.token.as_deref() == Some(tok.as_str())
+    {
+        return Ok(entry.pages.into_iter().map(|cp| cp.page).collect());
     }
 
+    // Incremental path: stat-walk and reuse unchanged files from the index.
+    let mut previous: std::collections::HashMap<String, CachedPage> =
+        std::collections::HashMap::new();
+    if let Some(ip) = &index_path
+        && let Ok(raw) = std::fs::read_to_string(ip)
+        && let Ok(entry) = serde_json::from_str::<WikiIndexEntry>(&raw)
+    {
+        for cp in entry.pages {
+            previous.insert(cp.rel.clone(), cp);
+        }
+    }
+
+    let pages_dir = dir.join("pages");
+    let mut out = Vec::new();
+    if pages_dir.is_dir() {
+        walk_pages_cached(&pages_dir, &pages_dir, &mut out, &mut previous);
+    }
     // Many real wikis keep pages at the repository root in topical directories
     // instead of under `pages/` (agntz's own convention). Scan the repo root
-    // too — excluding VCS/meta dirs and repo-meta files — so those pages are
+    // too -- excluding VCS/meta dirs and repo-meta files -- so those pages are
     // first-class for read/search/validate. `pages/` ids win on a clash.
     let seen: std::collections::HashSet<String> = out.iter().map(|p| p.id.clone()).collect();
     let mut root_pages = Vec::new();
-    walk_root_pages(dir, dir, &seen, &mut root_pages)?;
+    walk_root_pages_cached(dir, dir, &seen, &mut root_pages, &mut previous);
     out.extend(root_pages);
+
+    // Persist the index (best-effort).
+    if let Some(ip) = index_path
+        && let Some(parent) = ip.parent()
+        && std::fs::create_dir_all(parent).is_ok()
+    {
+        let pages: Vec<CachedPage> = out
+            .iter()
+            .map(|p| CachedPage {
+                rel: p.rel.clone(),
+                mtime: file_mtime_ns(&p.path),
+                size: std::fs::metadata(&p.path).map(|m| m.len()).unwrap_or(0),
+                page: p.clone(),
+            })
+            .collect();
+        let entry = WikiIndexEntry {
+            token: token.clone(),
+            pages,
+        };
+        if let Ok(json) = serde_json::to_string(&entry) {
+            let _ = std::fs::write(ip, json);
+        }
+    }
+
     Ok(out)
 }
 
-/// Walk a root-layout wiki (pages anywhere under the repo except `pages/`,
-/// `.git` and other dot-directories).
-fn walk_root_pages(
+fn file_mtime_ns(path: &Path) -> u128 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn git_head_dirty_token(dir: &Path) -> Option<String> {
+    if !dir.join(".git").exists() {
+        return None;
+    }
+    let head = crate::gitx::run(dir, &["rev-parse", "HEAD"])
+        .out()
+        .to_string();
+    let head = head.trim().to_string();
+    if head.is_empty() {
+        return None;
+    }
+    let dirty = crate::gitx::run(dir, &["status", "--porcelain"])
+        .out()
+        .to_string()
+        .lines()
+        .count();
+    Some(format!("{head}+{dirty}"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WikiIndexEntry {
+    token: Option<String>,
+    pages: Vec<CachedPage>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedPage {
+    rel: String,
+    mtime: u128,
+    size: u64,
+    page: Page,
+}
+
+/// Reuse a cached page when the file's (mtime, size) are unchanged; otherwise
+/// read + parse and refresh the cache entry. Returns None for unreadable files.
+fn cached_or_parse(
+    path: &Path,
+    id: &str,
+    rel: &str,
+    previous: &mut std::collections::HashMap<String, CachedPage>,
+) -> Option<Page> {
+    let mtime = file_mtime_ns(path);
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if let Some(cp) = previous.get(rel)
+        && cp.mtime == mtime
+        && cp.size == size
+    {
+        return Some(cp.page.clone());
+    }
+    match parse_page(path, id, rel) {
+        Ok(page) => {
+            previous.insert(
+                rel.to_string(),
+                CachedPage {
+                    rel: rel.to_string(),
+                    mtime,
+                    size,
+                    page: page.clone(),
+                },
+            );
+            Some(page)
+        }
+        Err(_) => None,
+    }
+}
+
+fn walk_pages_cached(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<Page>,
+    previous: &mut std::collections::HashMap<String, CachedPage>,
+) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_pages_cached(root, &path, out, previous);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md")
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            let rel_s = rel.to_string_lossy().replace('\\', "/");
+            let id = rel_s.trim_end_matches(".md").to_string();
+            if let Some(page) = cached_or_parse(&path, &id, &rel_s, previous) {
+                out.push(page);
+            }
+        }
+    }
+}
+
+fn walk_root_pages_cached(
     root: &Path,
     current: &Path,
     skip: &std::collections::HashSet<String>,
     out: &mut Vec<Page>,
-) -> Result<()> {
-    for entry in fs::read_dir(current)
-        .with_context(|| format!("reading {}", current.display()))?
-        .flatten()
-    {
+    previous: &mut std::collections::HashMap<String, CachedPage>,
+) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
             if name.starts_with('.') || name == "pages" {
                 continue;
             }
-            walk_root_pages(root, &path, skip, out)?;
+            walk_root_pages_cached(root, &path, skip, out, previous);
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
-                .replace('\\', "/");
+                .replace("\\", "/");
             // Repo-meta files at the ROOT level are not wiki pages.
             if !rel.contains('/') && matches!(rel.as_str(), "AGENTS.md" | "README.md") {
                 continue;
@@ -394,12 +551,11 @@ fn walk_root_pages(
             if skip.contains(&id) {
                 continue;
             }
-            if let Ok(page) = parse_page(&path, &id, &rel) {
+            if let Some(page) = cached_or_parse(&path, &id, &rel, previous) {
                 out.push(page);
             }
         }
     }
-    Ok(())
 }
 
 /// Normalize a page id supplied by the user: tolerate a leading `pages/` prefix
@@ -414,9 +570,14 @@ pub(crate) struct WikiHit {
 }
 
 /// Case-insensitive page search (title and body) over both wiki layouts.
-pub(crate) fn search_pages(dir: &Path, query: &str, limit: usize) -> Result<Vec<WikiHit>> {
+pub(crate) fn search_pages(
+    dir: &Path,
+    query: &str,
+    limit: usize,
+    state_dir: Option<&Path>,
+) -> Result<Vec<WikiHit>> {
     let q = query.to_ascii_lowercase();
-    let pages = scan_pages(dir)?;
+    let pages = scan_pages_cached(dir, state_dir)?;
     let mut scored: Vec<(usize, WikiHit)> = Vec::new();
     for p in pages {
         let title_hit = p.title.to_ascii_lowercase().contains(&q);
@@ -444,37 +605,6 @@ fn normalize_page_id(id: &str) -> String {
         .to_string()
 }
 
-fn walk_pages(root: &Path, current: &Path, out: &mut Vec<Page>) -> Result<()> {
-    for entry in fs::read_dir(current)
-        .with_context(|| format!("reading {}", current.display()))?
-        .flatten()
-    {
-        let path = entry.path();
-        if path.is_dir() {
-            walk_pages(root, &path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md")
-            && let Ok(rel) = path.strip_prefix(root)
-        {
-            let id = rel
-                .to_string_lossy()
-                .replace('\\', "/")
-                .trim_end_matches(".md")
-                .to_string();
-            if let Ok(page) = parse_page(&path, &id, &resolve_rel(root, &path)) {
-                out.push(page);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn resolve_rel(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
 /// Map page id -> Page for lookup and validation.
 fn page_map(pages: &[Page]) -> HashMap<String, &Page> {
     let mut map = HashMap::new();
@@ -488,7 +618,7 @@ fn handle_list(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     sync_wiki(&dir, repo)?;
-    let pages = scan_pages(&dir)?;
+    let pages = scan_pages_cached(&dir, Some(&ctx.paths.state_dir))?;
 
     if ctx.common.json {
         let payload = serde_json::json!({
@@ -533,7 +663,7 @@ fn handle_search(
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     sync_wiki(&dir, repo)?;
-    let pages = scan_pages(&dir)?;
+    let pages = scan_pages_cached(&dir, Some(&ctx.paths.state_dir))?;
 
     let query_lower = query.to_ascii_lowercase();
     let mut matches = Vec::new();
@@ -607,7 +737,7 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, page_id: &str) -> Resul
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     sync_wiki(&dir, repo)?;
-    let pages = scan_pages(&dir)?;
+    let pages = scan_pages_cached(&dir, Some(&ctx.paths.state_dir))?;
     let want = normalize_page_id(page_id);
     let page = pages
         .iter()
@@ -934,7 +1064,7 @@ fn handle_validate(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     sync_wiki(&dir, repo)?;
-    let pages = scan_pages(&dir)?;
+    let pages = scan_pages_cached(&dir, Some(&ctx.paths.state_dir))?;
     let map = page_map(&pages);
 
     let mut broken = Vec::new();

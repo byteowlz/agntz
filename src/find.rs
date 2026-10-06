@@ -482,8 +482,12 @@ async fn find_wiki(
             },
             Value::Null,
         ),
-        Ok(repo) => match crate::wiki::search_pages(std::path::Path::new(&repo.path), query, limit)
-        {
+        Ok(repo) => match crate::wiki::search_pages(
+            std::path::Path::new(&repo.path),
+            query,
+            limit,
+            Some(&ctx.paths.state_dir),
+        ) {
             Ok(hits) => {
                 let count = hits.len();
                 let rows = hits
