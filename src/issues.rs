@@ -145,8 +145,13 @@ fn handle_list(status: Option<&str>, issue_type: Option<&str>, json: bool) -> Re
 }
 
 fn run_trx(args: &[&str], json: bool, verb: &str) -> Result<()> {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let (ok, out, err) = readout::run("trx", &args);
+    let mut owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    // Write verbs must return the structured trx payload too, not pre-rendered
+    // human text (envelope-consistency finding from the fifth ergonomics review).
+    if json && !owned.iter().any(|a| a == "--json") {
+        owned.push("--json".to_string());
+    }
+    let (ok, out, err) = readout::run("trx", &owned);
     if json {
         readout::emit(
             verb,
@@ -161,6 +166,18 @@ fn run_trx(args: &[&str], json: bool, verb: &str) -> Result<()> {
 }
 
 fn print_plain(out: &str, err: &str) {
+    // The underlying tool says "trx init"; agntz is the entry point, so point
+    // users at `agntz init`.
+    let rewrite = |t: &str| {
+        t.replace("trx init", "agntz init")
+            .replace("run trx", "run agntz")
+    };
+    let out = rewrite(out);
+    let err = rewrite(err);
+    if out.trim() == "[]" {
+        println!("No issues.");
+        return;
+    }
     print!("{out}");
     if !err.is_empty() {
         eprint!("{err}");

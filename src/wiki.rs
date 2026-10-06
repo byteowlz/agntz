@@ -151,6 +151,12 @@ pub enum WikiCommand {
         default: bool,
     },
 
+    /// Remove a wiki repository from the registry (files are not touched).
+    Unregister {
+        /// Registered name to remove.
+        name: String,
+    },
+
     /// List registered wiki repositories.
     Repos,
 
@@ -245,6 +251,7 @@ pub fn handle(command: WikiCommand, ctx: &RuntimeContext) -> Result<()> {
             default,
         ),
         WikiCommand::Repos => handle_repo_list(ctx),
+        WikiCommand::Unregister { name } => handle_unregister(ctx, &name),
         WikiCommand::Config { name } => handle_config_cmd(ctx, name.as_deref()),
     }
 }
@@ -254,6 +261,14 @@ pub(crate) fn resolve_repo<'a>(
     ctx: &'a RuntimeContext,
     name: Option<&'a str>,
 ) -> Result<&'a RepoConfig> {
+    // Standing inside a registered wiki selects it (exact path-containment),
+    // taking precedence over env/config-default; an explicit --name wins.
+    if name.is_none()
+        && let Some(repo) = cwd_selected(&ctx.config.wiki.repos)
+    {
+        return Ok(repo);
+    }
+
     // (public within the crate so `agntz find` can resolve the default repo)
 
     let env = std::env::var("AGNTZ_WIKI").ok();
@@ -558,6 +573,16 @@ fn walk_root_pages_cached(
     }
 }
 
+/// The registered wiki whose path contains the current working directory.
+fn cwd_selected(repos: &[RepoConfig]) -> Option<&RepoConfig> {
+    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
+    repos.iter().find(|r| {
+        std::path::Path::new(&r.path)
+            .canonicalize()
+            .is_ok_and(|rp| cwd.starts_with(&rp))
+    })
+}
+
 /// Normalize a page id supplied by the user: tolerate a leading `pages/` prefix
 /// and a trailing `.md`, so natural file paths work for `wiki read`/lookups.
 /// A wiki hit for the unified `find` surface.
@@ -842,7 +867,11 @@ fn handle_create(
             }),
         );
     } else {
-        println!("Page '{page_id}' created at {}", page_path.display());
+        println!(
+            "Page '{}' created at {}",
+            normalize_page_id(page_id),
+            page_path.display()
+        );
     }
     Ok(())
 }
@@ -958,7 +987,11 @@ fn handle_update(
             }),
         );
     } else {
-        println!("Page '{page_id}' updated at {}", page_path.display());
+        println!(
+            "Page '{}' updated at {}",
+            normalize_page_id(page_id),
+            page_path.display()
+        );
     }
     Ok(())
 }
@@ -1330,7 +1363,7 @@ fn handle_init(
     gitx::commit(&expanded, &format!("wiki: initialize {name}"))?;
 
     // When a remote was explicitly given, publish the initial commit.
-    crate::board::publish_initial(&expanded, remote, name)?;
+    crate::board::publish_initial(&expanded, remote, name, "wiki")?;
 
     register_config(ctx, name, &expanded, remote, role, default)?;
 
@@ -1480,10 +1513,13 @@ fn handle_repo_list(ctx: &RuntimeContext) -> Result<()> {
 
 fn handle_config_cmd(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
+    let cwd_selected = name.is_none() && cwd_selected(wiki_repos(ctx)).is_some();
     let source = if std::env::var("AGNTZ_WIKI").ok().is_some() {
         "env AGNTZ_WIKI"
     } else if name.is_some() {
         "flag --name"
+    } else if cwd_selected {
+        "cwd"
     } else {
         "config default / first"
     };
@@ -1579,4 +1615,38 @@ pub(crate) fn resolve_repo_pub<'a>(
     name: Option<&'a str>,
 ) -> Result<&'a agntz::config::RepoConfig> {
     resolve_repo(ctx, name)
+}
+
+/// Remove a wiki repository from the registry. Only the registration is
+/// removed — the repository itself and its pages are left untouched.
+fn handle_unregister(ctx: &RuntimeContext, name: &str) -> Result<()> {
+    if ctx.common.dry_run {
+        log::info!("dry-run: would unregister wiki '{name}'");
+        return Ok(());
+    }
+    let mut cfg = ctx.config.clone();
+    let before = cfg.wiki.repos.len();
+    cfg.wiki.repos.retain(|r| r.name != name);
+    if cfg.wiki.repos.len() == before {
+        return Err(anyhow!("no wiki named '{name}' is registered"));
+    }
+    if cfg.wiki.default == name {
+        cfg.wiki.default = String::new();
+    }
+    save_config(ctx, &cfg)?;
+    if ctx.common.json {
+        readout::emit(
+            "wiki/unregister",
+            true,
+            None,
+            serde_json::json!({"name": name}),
+        );
+        return Ok(());
+    }
+    println!("Wiki '{name}' unregistered (files left in place).");
+    Ok(())
+}
+
+fn wiki_repos(ctx: &RuntimeContext) -> &[RepoConfig] {
+    &ctx.config.wiki.repos
 }

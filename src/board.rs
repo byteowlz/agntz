@@ -151,6 +151,12 @@ pub enum BoardCommand {
     #[command(alias = "list")]
     Repos,
 
+    /// Remove a board repository from the registry (files are not touched).
+    Unregister {
+        /// Registered name to remove.
+        name: String,
+    },
+
     /// Show the effective board repository and config source.
     Config {
         /// Select a named board repository.
@@ -236,6 +242,7 @@ pub fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             default,
         ),
         BoardCommand::Repos => handle_list(ctx),
+        BoardCommand::Unregister { name } => handle_unregister(ctx, &name),
         BoardCommand::Config { name } => handle_config_cmd(ctx, name.as_deref()),
     }
 }
@@ -247,6 +254,15 @@ pub(crate) fn resolve_repo<'a>(
 ) -> Result<&'a RepoConfig> {
     // (public within the crate so `agntz find` can resolve the default repo)
 
+    // Standing inside a registered repo selects it (exact path-containment, no
+    // fuzzy nearest-path search), taking precedence over env/config-default.
+    // An explicit --name flag still wins.
+    if name.is_none()
+        && let Some(repo) = cwd_selected(&ctx.config.board.repos)
+    {
+        return Ok(repo);
+    }
+
     let env = std::env::var("AGNTZ_BOARD").ok();
     select_repo(
         &ctx.config.board.repos,
@@ -254,6 +270,16 @@ pub(crate) fn resolve_repo<'a>(
         name,
         env.as_deref(),
     )
+}
+
+/// The registered repo whose path contains the current working directory, if any.
+fn cwd_selected(repos: &[RepoConfig]) -> Option<&RepoConfig> {
+    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
+    repos.iter().find(|r| {
+        std::path::Path::new(&r.path)
+            .canonicalize()
+            .is_ok_and(|rp| cwd.starts_with(&rp))
+    })
 }
 
 /// Derive a filesystem-safe slug from a topic name.
@@ -419,8 +445,14 @@ fn cursor_dir(ctx: &RuntimeContext, repo: &RepoConfig) -> PathBuf {
     ctx.paths.state_dir.join("board-cur").join(&repo.name)
 }
 
-fn session_cursor_path(ctx: &RuntimeContext, repo: &RepoConfig, session_id: &str) -> PathBuf {
-    cursor_dir(ctx, repo).join(format!("session-{session_id}.json"))
+fn session_cursor_path(
+    ctx: &RuntimeContext,
+    repo: &RepoConfig,
+    session_id: &str,
+    role: &str,
+) -> PathBuf {
+    // Role-scoped: two roles in one session must not consume each other's inbox.
+    cursor_dir(ctx, repo).join(format!("session-{session_id}-{role}.json"))
 }
 
 fn role_cursor_path(ctx: &RuntimeContext, repo: &RepoConfig, role: &str) -> PathBuf {
@@ -449,7 +481,7 @@ fn current_cursor(
     session_id: &str,
     role: &str,
 ) -> Result<ReadCursor> {
-    if let Some(c) = load_cursor(&session_cursor_path(ctx, repo, session_id)) {
+    if let Some(c) = load_cursor(&session_cursor_path(ctx, repo, session_id, role)) {
         return Ok(c);
     }
     if let Some(mut c) = load_cursor(&role_cursor_path(ctx, repo, role)) {
@@ -482,7 +514,7 @@ fn save_ack(
         last_acked_commit: commit.map(str::to_string),
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    save_cursor(&session_cursor_path(ctx, repo, session_id), &c)?;
+    save_cursor(&session_cursor_path(ctx, repo, session_id, role), &c)?;
     save_cursor(&role_cursor_path(ctx, repo, role), &c)
 }
 
@@ -816,6 +848,11 @@ fn handle_inbox(
         } else {
             ""
         };
+        if messages.is_empty() {
+            println!("Board is empty (no messages yet).");
+            surface_sync_warning(&sync_warning);
+            return Ok(());
+        }
         println!("Inbox for role '{}' is empty{}", role, suffix);
         // Make the incremental semantics visible: an empty inbox after a plain
         // read usually means the cursor already consumed it, not an empty board.
@@ -1007,7 +1044,7 @@ fn print_compact_message(m: &Message) {
     println!(
         "{topic}  {id}  {from}  {title}  - {excerpt}",
         topic = m.topic,
-        id = short_id(&m.id),
+        id = m.id,
         from = m.header("From").unwrap_or("?"),
         title = message_title(m),
         excerpt = excerpt(&m.body),
@@ -1023,15 +1060,6 @@ fn print_compact_message(m: &Message) {
 fn excerpt(body: &str) -> String {
     let first = body.lines().next().unwrap_or("").trim().to_string();
     agntz::clip_to_words(&first, 80)
-}
-
-#[must_use]
-fn short_id(id: &str) -> String {
-    if id.len() > 8 {
-        id[..8].to_string()
-    } else {
-        id.to_string()
-    }
 }
 
 /// Normalize a Message-ID for comparison: trim whitespace and strip RFC5322
@@ -1596,7 +1624,12 @@ fn push_with_race_retry(dir: &Path, branch: &str) -> Result<()> {
 /// Push the initial commit to `origin` when a remote was explicitly given.
 /// Never force-pushes; a failure is reported but does not abort init (the local
 /// repo stays valid and recoverable).
-pub(crate) fn publish_initial(dir: &Path, remote: Option<&str>, name: &str) -> Result<()> {
+pub(crate) fn publish_initial(
+    dir: &Path,
+    remote: Option<&str>,
+    name: &str,
+    kind: &str,
+) -> Result<()> {
     let Some(remote) = remote.filter(|r| !r.is_empty()) else {
         return Ok(());
     };
@@ -1606,7 +1639,7 @@ pub(crate) fn publish_initial(dir: &Path, remote: Option<&str>, name: &str) -> R
     let branch = gitx::current_branch(dir).unwrap_or_else(|| "main".to_string());
     match gitx::run_need(dir, &["push", "-u", "origin", &branch]) {
         Ok(_) => {
-            log::info!("initialized {name}: pushed to origin/{branch}");
+            log::info!("initialized {kind} {name}: pushed to origin/{branch}");
             repair_remote_head(Path::new(remote), &branch);
         }
         Err(e) => eprintln!(
@@ -1783,7 +1816,7 @@ fn handle_init(
 
     // When a remote was explicitly given, publish the initial commit so the
     // fresh remote isn't left empty (an explicit `--remote` opt-in).
-    publish_initial(&expanded, remote, name)?;
+    publish_initial(&expanded, remote, name, "board")?;
 
     register_config(ctx, name, &expanded, remote, role, default)?;
 
@@ -1958,10 +1991,13 @@ fn handle_list(ctx: &RuntimeContext) -> Result<()> {
 
 fn handle_config_cmd(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
+    let cwd_selected = name.is_none() && cwd_selected(board_repos(ctx)).is_some();
     let source = if std::env::var("AGNTZ_BOARD").ok().is_some() {
         "env AGNTZ_BOARD"
     } else if name.is_some() {
         "flag --name"
+    } else if cwd_selected {
+        "cwd"
     } else {
         "config default / first"
     };
@@ -2108,4 +2144,38 @@ pub(crate) fn resolve_repo_pub<'a>(
     name: Option<&'a str>,
 ) -> Result<&'a agntz::config::RepoConfig> {
     resolve_repo(ctx, name)
+}
+
+/// Remove a board repository from the registry. Only the registration is
+/// removed — the repository itself and its messages are left untouched.
+fn handle_unregister(ctx: &RuntimeContext, name: &str) -> Result<()> {
+    if ctx.common.dry_run {
+        log::info!("dry-run: would unregister board '{name}'");
+        return Ok(());
+    }
+    let mut cfg = ctx.config.clone();
+    let before = cfg.board.repos.len();
+    cfg.board.repos.retain(|r| r.name != name);
+    if cfg.board.repos.len() == before {
+        return Err(anyhow!("no board named '{name}' is registered"));
+    }
+    if cfg.board.default == name {
+        cfg.board.default = String::new();
+    }
+    save_config(ctx, &cfg)?;
+    if ctx.common.json {
+        readout::emit(
+            "board/unregister",
+            true,
+            None,
+            serde_json::json!({"name": name}),
+        );
+        return Ok(());
+    }
+    println!("Board '{name}' unregistered (files left in place).");
+    Ok(())
+}
+
+fn board_repos(ctx: &RuntimeContext) -> &[RepoConfig] {
+    &ctx.config.board.repos
 }

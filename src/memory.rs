@@ -341,12 +341,17 @@ async fn handle_list(
     json: bool,
     full: bool,
 ) -> Result<()> {
-    // mmry 0.14's `list` accepts no --limit/--category/--full (the scope is
-    // general + current repository). The flags stay accepted on agntz's surface
-    // for compatibility but are not forwarded, since forwarding them fails the
-    // whole command at mmry's clap level.
-    let _ = (limit, category, full);
-    let args = vec!["ls".to_string()];
+    // mmry 0.14.x restored `list --limit N`; --category/--full have no
+    // equivalent and are accepted-but-not-forwarded.
+    let _ = category;
+    let mut args = vec!["ls".to_string()];
+    if let Some(l) = limit {
+        args.push("--limit".to_string());
+        args.push(l.to_string());
+    }
+    if full {
+        // No direct equivalent; ignored.
+    }
 
     if json {
         let mut jargs = args.clone();
