@@ -21,10 +21,12 @@ use std::process::Command;
 
 use crate::gvnr;
 
-/// Effective AGENT_CTX read from the environment (producer-map, v2).
+/// Effective AGENT_CTX read from the environment (producer-map, v3-tolerant).
 ///
-/// Every field is optional except the contract floor (VERSION/HARNESS/RUN_MODE)
-/// meaning "AGENT_CTX is enabled". Missing = this layer is absent; we tolerate.
+/// Every field is optional except the contract floor (VERSION) meaning
+/// "AGENT_CTX is enabled". Missing = this layer is absent; we tolerate.
+/// [`AgentCtx::is_enabled`] checks only whether VERSION is present; HARNESS is
+/// a normal optional bag member, not part of the floor.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AgentCtx {
     /// Contract version (AGENT_CTX_VERSION), when AGENT_CTX is enabled.
@@ -74,6 +76,18 @@ const BAG_MEMBERS: &[(&str, &[&str])] = &[
     (
         "tracing",
         &["REQUEST_ID", "CORRELATION_ID", "SANDBOX_PROFILE"],
+    ),
+    (
+        "execution",
+        &[
+            "EXEC_ENV",
+            "LAUNCHER",
+            "EXECUTION_ID",
+            "EXECUTION_GENERATION",
+            "EXECUTION_TRANSPORT",
+            "ISOLATION",
+            "ATTACHMENT",
+        ],
     ),
 ];
 
@@ -894,6 +908,15 @@ mod tests {
     }
 
     #[test]
+    fn version_alone_is_the_v3_floor() {
+        // The v3 contract floor is VERSION only. HARNESS and RUN_MODE are not
+        // required to consider context enabled; absent harness bag is fine.
+        let ctx = make_ctx(&[("VERSION", "3")]);
+        assert!(ctx.is_enabled());
+        assert!(ctx.bags.is_empty());
+    }
+
+    #[test]
     fn reads_full_producer_map() {
         let ctx = make_ctx(&[
             ("VERSION", "2"),
@@ -918,6 +941,21 @@ mod tests {
         assert_eq!(ctx.lineage.agent_id.as_deref(), Some("agent_1"));
         assert_eq!(ctx.val("host", "MACHINE_ID").as_deref(), Some("node-1"));
         assert!(ctx.display_identity().starts_with("pi"));
+    }
+
+    #[test]
+    fn reads_v3_execution_bag() {
+        let ctx = make_ctx(&[
+            ("VERSION", "3"),
+            ("HARNESS", "pi"),
+            ("EXEC_ENV", "linux-container"),
+            ("EXECUTION_TRANSPORT", "ssh"),
+            ("ISOLATION", "vm,container"),
+        ]);
+        assert!(ctx.is_enabled());
+        assert_eq!(ctx.val("execution", "EXEC_ENV").as_deref(), Some("linux-container"));
+        assert_eq!(ctx.val("execution", "EXECUTION_TRANSPORT").as_deref(), Some("ssh"));
+        assert_eq!(ctx.val("execution", "ISOLATION").as_deref(), Some("vm,container"));
     }
 
     #[test]
