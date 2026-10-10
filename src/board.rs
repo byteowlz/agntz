@@ -403,9 +403,12 @@ fn parse_message(path: &Path, topic: &str) -> Result<Message> {
             headers.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
+    // A present-but-empty Message-ID header (malformed message) must fall
+    // through to the filename-derived id, otherwise the message keys as "".
     let id = headers
         .get("Message-ID")
         .cloned()
+        .filter(|s| !s.trim().is_empty())
         .or_else(|| {
             path.file_stem().and_then(|s| s.to_str()).map(|s| {
                 s.split_once('-')
