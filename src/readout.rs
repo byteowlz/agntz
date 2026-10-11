@@ -64,10 +64,15 @@ pub fn emit(verb: &str, ok: bool, error: Option<String>, result: Value) {
         "result": result,
     });
     LAST_OK.with(|c| *c.borrow_mut() = Some(ok));
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&envelope).unwrap_or_default()
-    );
+    // Pretty for a human at a terminal; compact when piped (agents, scripts,
+    // codemode), where indentation is pure token cost with no information.
+    use std::io::IsTerminal;
+    let rendered = if std::io::stdout().is_terminal() {
+        serde_json::to_string_pretty(&envelope)
+    } else {
+        serde_json::to_string(&envelope)
+    };
+    println!("{}", rendered.unwrap_or_default());
 }
 
 #[cfg(test)]

@@ -347,9 +347,48 @@ impl RuntimeContext {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    try_main().await
+/// Whether a panic payload is the std "failed printing to stdout: Broken pipe".
+fn is_broken_pipe(payload: &(dyn std::any::Any + Send)) -> bool {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .is_some_and(|m| m.contains("Broken pipe"))
+}
+
+fn main() -> std::process::ExitCode {
+    // `agntz ... | head` / `| grep -q` close stdout early; println! then panics
+    // with "Broken pipe". Like ripgrep, treat a reader that stopped reading as
+    // a clean exit: no panic noise in the agent's output and exit 0, so
+    // `set -o pipefail` pipelines don't fail. Every other panic keeps the
+    // default report and exit code.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !is_broken_pipe(info.payload()) {
+            default_hook(info);
+        }
+    }));
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: failed to start async runtime: {e}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(try_main())
+    }));
+    match outcome {
+        Ok(Ok(())) => std::process::ExitCode::SUCCESS,
+        Ok(Err(e)) => {
+            // Same rendering as `fn main() -> anyhow::Result<()>`.
+            eprintln!("Error: {e:?}");
+            std::process::ExitCode::FAILURE
+        }
+        Err(payload) if is_broken_pipe(payload.as_ref()) => std::process::ExitCode::SUCCESS,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 async fn try_main() -> Result<()> {

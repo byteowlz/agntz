@@ -107,14 +107,14 @@ EOF
 (cd "$WORK/board" && git add -A && git commit -q -m "inbound2" && git push -q origin main)
 
 echo "[8] stale clone auto-syncs (fetch+merge) before a read (P0-1)"
-check "$AGNTZ board inbox --role agent --name peer | grep -q 22222222-2222-2222-2222-222222222222" \
+check "$AGNTZ board inbox --role agent --name peer | grep -q 22222222" \
   "stale clone sees pushed message without manual pull"
 
 FIRST_REV="$(git -C "$WORK/board" rev-parse --short main~1)"
 echo "[9] inbox --since <commit> narrows to messages after it (P1-4)"
-check "$AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 22222222-2222-2222-2222-222222222222" \
+check "$AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 22222222" \
   "--since commit shows the later message"
-check "! $AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 11111111-1111-1111-1111-111111111111" \
+check "! $AGNTZ board inbox --role agent --since "$FIRST_REV" | grep -q 11111111" \
   "--since commit hides the earlier message"
 check "! $AGNTZ board inbox --role agent --since notaref >/dev/null 2>&1" "invalid --since is rejected"
 
@@ -217,9 +217,9 @@ $AGNTZ board init t2 "$WORK/t2b" --role agent >/dev/null
 mkdir -p "$WORK/t2b/topics/t"
 printf 'Message-ID: eeeeeeee-5555-5555-5555-555555555555\nSent-At: 2026-09-28T00:00:00Z\nFrom: other-agent\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nTitle from this body line.\n' > "$WORK/t2b/topics/t/20260928T000000Z-eeeeeeee-5555-5555-5555-555555555555.txt"
 (cd "$WORK/t2b" && git add -A && git commit -q -m m)
-check "$AGNTZ board inbox --role agent --name t2 --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin)[\"result\"][\"messages\"][0]; assert d[\"title\"]==\"Title from this body line.\" and d[\"subject\"] is None'" "title defaults to body line in --json"
+check "$AGNTZ board inbox --role agent --name t2 --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin)[\"result\"][\"messages\"][0]; assert d[\"subject\"]==\"Title from this body line.\" and \"title\" not in d and \"excerpt\" not in d'" "subject defaults to body line in --json (no duplicate excerpt)"
 $AGNTZ board reply eeeeeeee-5555-5555-5555-555555555555 --name t2 --body 'Inline reply.' >/dev/null 2>&1
-check "$AGNTZ board inbox --role all --name t2 --json 2>/dev/null | python3 -c 'import sys,json; ms=json.load(sys.stdin)[\"result\"][\"messages\"]; assert any(\"Inline reply\" in m[\"title\"] for m in ms)'" "reply --body inline (no file)"
+check "$AGNTZ board inbox --role all --name t2 --json 2>/dev/null | python3 -c 'import sys,json; ms=json.load(sys.stdin)[\"result\"][\"messages\"]; assert any(\"Inline reply\" in m[\"subject\"] for m in ms)'" "reply --body inline (no file)"
 
 echo "[21] configured repo paths are stored absolute (cwd-independent)"
 check "grep -Eq '^path = \"/' '$WORK/cfg/agntz/config.toml'" "config stores absolute repo paths"
@@ -242,7 +242,7 @@ echo "[24] topic timestamps with an offset render as UTC"
 mkdir -p "$WORK/board/topics/off"
 printf 'Message-ID: efefefef-8888-8888-8888-888888888888\nSent-At: 2026-10-02T12:00:00+02:00\nFrom: other\nFrom-Agent: pi\nTo: agent\nIn-Reply-To: none\n\nSubject: Off\n\nOff.\n' > "$WORK/board/topics/off/20261002T100000Z-efefefef-8888-8888-8888-888888888888.txt"
 (cd "$WORK/board" && git add -A && git commit -q -m off && git push -q origin main)
-check "$AGNTZ board topics 2>/dev/null | grep -q '2026-10-02T10:00:00Z'" "+02:00 offset renders as UTC in topics"
+check "$AGNTZ board topics --json 2>/dev/null | python3 -c 'import sys,json; ts=[t[\"last_sent_at\"] for t in json.load(sys.stdin)[\"result\"][\"topics\"] if t[\"topic\"]==\"off\"]; assert ts==[\"2026-10-02T10:00:00Z\"], ts'" "+02:00 offset renders as UTC in topics"
 
 # A message whose Message-ID header carries RFC5322 angle brackets must be
 # addressable by BOTH the bracketed and the bare id (read/reply/ack/--since).
@@ -256,9 +256,25 @@ check "$AGNTZ board reply 'cccccccc-9999-9999-9999-999999999999' --body r >/dev/
 
 echo "[26] --since all bypasses the read cursor (full history)"
 $AGNTZ board inbox --role agent >/dev/null 2>&1
-check "$AGNTZ board inbox --role agent --since all 2>/dev/null | grep -q 'cccccccc-9999'" "--since all shows already-read messages"
+check "$AGNTZ board inbox --role agent --since all 2>/dev/null | grep -q 'cccccccc'" "--since all shows already-read messages"
 # And the no-arg read states that the cursor consumed the board.
 check "$AGNTZ board inbox --role agent 2>/dev/null | grep -q 'use --since all'" "empty inbox notes the cursor + escape hatch"
+
+echo "[27] inbox --topic filters, and a topic view never advances the cursor"
+$AGNTZ board init tp "$WORK/tpb" --role agent >/dev/null 2>&1
+$AGNTZ board post alpha --name tp --subject "Alpha one" --body "a1" >/dev/null 2>&1
+$AGNTZ board post beta --name tp --subject "Beta one" --body "b1" >/dev/null 2>&1
+check "$AGNTZ board inbox --name tp --role all --topic alpha --since all | grep -q 'Alpha one'" "--topic shows its own topic"
+check "! $AGNTZ board inbox --name tp --role all --topic alpha --since all | grep -q 'Beta one'" "--topic hides other topics"
+# an auto (cursor) read scoped to alpha must not mark beta as read
+$AGNTZ board inbox --name tp --role all --topic alpha >/dev/null 2>&1
+check "$AGNTZ board inbox --name tp --role all | grep -q 'Beta one'" "topic view did not consume other topics"
+
+echo "[28] short ids: inbox shows unique prefixes that read/reply resolve"
+SHORT="$($AGNTZ board inbox --name tp --role all --since all | awk '/Alpha one/{print $1}')"
+check "test \"\${#SHORT}\" -ge 8 && test \"\${#SHORT}\" -lt 36" "inbox row id is a short prefix"
+check "$AGNTZ board read --name tp \"$SHORT\" | grep -q 'Alpha one'" "read resolves the short prefix"
+check "$AGNTZ board read --name tp \"$SHORT\" --raw | grep -q '^Message-ID: '" "read --raw prints the verbatim file"
 
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

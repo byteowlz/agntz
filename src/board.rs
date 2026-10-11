@@ -41,15 +41,21 @@ pub enum BoardCommand {
         /// Maximum messages to return.
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Only messages in this topic (slug).
+        #[arg(long)]
+        topic: Option<String>,
     },
 
     /// Read a single message by Message-ID.
     Read {
-        /// Message-ID to read.
+        /// Message-ID to read (a unique prefix is enough).
         message_id: String,
         /// Select a named board repository.
         #[arg(long)]
         name: Option<String>,
+        /// Print the message file verbatim (byte-exact headers and body).
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Publish a reply as a new immutable message.
@@ -212,8 +218,20 @@ pub async fn handle(command: BoardCommand, ctx: &RuntimeContext) -> Result<()> {
             name,
             since,
             limit,
-        } => handle_inbox(ctx, name.as_deref(), &role, since.as_deref(), limit),
-        BoardCommand::Read { message_id, name } => handle_read(ctx, name.as_deref(), &message_id),
+            topic,
+        } => handle_inbox(
+            ctx,
+            name.as_deref(),
+            &role,
+            since.as_deref(),
+            limit,
+            topic.as_deref(),
+        ),
+        BoardCommand::Read {
+            message_id,
+            name,
+            raw,
+        } => handle_read(ctx, name.as_deref(), &message_id, raw),
         BoardCommand::Reply {
             message_id,
             body_file,
@@ -767,7 +785,7 @@ fn handle_topics(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
                 "topic": t,
                 "count": list.len(),
                 "last_sent_at": last.and_then(|m| m.sent_at().map(normalize_datetime)),
-                "last_subject": last.and_then(|m| m.subject().map(str::to_string)),
+                "last_subject": last.map(resolved_subject),
             })
         })
         .collect::<Vec<_>>();
@@ -775,12 +793,11 @@ fn handle_topics(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     surface_sync_warning(&sync_warning);
 
     if ctx.common.json {
-        let payload = serde_json::json!({
+        let payload = without_nulls(serde_json::json!({
             "repo": repo.name,
-            "path": repo.path,
             "sync_warning": sync_warning,
             "topics": topics,
-        });
+        }));
         readout::emit("board/topics", true, None, payload);
         return Ok(());
     }
@@ -793,9 +810,11 @@ fn handle_topics(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
         println!(
             "{count:>4}  {last_sent_at}  {topic}  {last_subject}",
             count = t["count"],
-            last_sent_at = t["last_sent_at"].as_str().unwrap_or("-"),
+            last_sent_at = t["last_sent_at"]
+                .as_str()
+                .map_or_else(|| "-".to_string(), listing_time),
             topic = t["topic"].as_str().unwrap_or("-"),
-            last_subject = t["last_subject"].as_str().unwrap_or(""),
+            last_subject = agntz::clip_to_words(t["last_subject"].as_str().unwrap_or(""), 72),
         );
     }
     Ok(())
@@ -807,7 +826,15 @@ fn handle_inbox(
     role: &str,
     since: Option<&str>,
     limit: usize,
+    topic: Option<&str>,
 ) -> Result<()> {
+    // Topic dirs are slugs; accept either the slug or the raw topic name.
+    let topic_slug = topic.map(slugify);
+    let in_topic = |m: &Message| {
+        topic_slug
+            .as_deref()
+            .is_none_or(|t| m.topic == t || topic.is_some_and(|raw| m.topic == raw))
+    };
     let repo = resolve_repo(ctx, name)?;
     let (dir, sync_warning) = open_repo(ctx, repo, true)?;
     let mut messages = scan_messages(&dir)?;
@@ -857,7 +884,7 @@ fn handle_inbox(
         {
             continue;
         }
-        if role_matches(m, &role_lower) {
+        if role_matches(m, &role_lower) && in_topic(m) {
             relevant.push(m.clone());
         }
         if relevant.len() >= limit {
@@ -870,7 +897,7 @@ fn handle_inbox(
         .enumerate()
         .filter(|(idx, m)| {
             let in_keep = cutoff_pos.as_ref().is_none_or(|keep| keep.contains(idx));
-            in_keep && role_matches(m, &role_lower)
+            in_keep && role_matches(m, &role_lower) && in_topic(m)
         })
         .count()
         > relevant.len();
@@ -878,7 +905,7 @@ fn handle_inbox(
     // Auto-advance the read cursor after a complete (non-truncated) read, and
     // only when not using an explicit `--since` (manual control). Bounded output
     // is intentionally NOT marked read, so nothing is skipped.
-    if auto && !since_all && !truncated {
+    if auto && !since_all && !truncated && topic.is_none() {
         let head = gitx::run(&dir, &["rev-parse", "HEAD"]).out().to_string();
         let head = head.trim();
         let last_id = messages.last().map(|m| m.id.as_str()).unwrap_or("");
@@ -893,15 +920,14 @@ fn handle_inbox(
     }
 
     if ctx.common.json {
-        let payload = serde_json::json!({
+        let payload = without_nulls(serde_json::json!({
             "repo": repo.name,
-            "path": repo.path,
             "role": role,
             "since": effective_since,
             "truncated": truncated,
             "sync_warning": sync_warning,
             "messages": relevant.iter().map(compact_message_json).collect::<Vec<_>>(),
-        });
+        }));
         readout::emit("board/inbox", true, None, payload);
         return Ok(());
     }
@@ -933,9 +959,37 @@ fn handle_inbox(
         return Ok(());
     }
     surface_sync_warning(&sync_warning);
+    // Topic printed only when it changes (rows stay in time order); ids are the
+    // shortest unique prefix; one footer instead of a per-row read hint + path.
+    let shorts = short_ids(&messages);
+    // Group by topic (groups in order of first appearance, rows in time order).
+    // Every row carries its timestamp, so cross-topic ordering stays recoverable.
+    let mut order: Vec<&str> = Vec::new();
+    let mut groups: HashMap<&str, Vec<&Message>> = HashMap::new();
     for m in &relevant {
-        print_compact_message(m);
+        let t = m.topic.as_str();
+        if !groups.contains_key(t) {
+            order.push(t);
+        }
+        groups.entry(t).or_default().push(m);
     }
+    for topic in order {
+        println!("{topic}");
+        for m in &groups[topic] {
+            let id = normalize_message_id(&m.id);
+            println!(
+                "  {id}  {when}  {from}  {subject}",
+                id = shorts.get(&id).map_or(id.as_str(), String::as_str),
+                when = m
+                    .sent_at()
+                    .filter(|s| !s.trim().is_empty())
+                    .map_or_else(|| "-".to_string(), listing_time),
+                from = m.header("From").filter(|s| !s.is_empty()).unwrap_or("?"),
+                subject = agntz::clip_to_words(&resolved_subject(m), 90),
+            );
+        }
+    }
+    println!("read: agntz board read <id>  (ids are unique prefixes)");
     if truncated {
         eprintln!("note: more relevant messages exist; raise --limit or use --since to continue");
     }
@@ -999,10 +1053,7 @@ fn resolve_cursor(
     let Some(since) = since else {
         return Ok(None);
     };
-    if let Some(pos) = messages
-        .iter()
-        .position(|m| normalize_message_id(&m.id) == normalize_message_id(since))
-    {
+    if let Some(pos) = resolve_message_index(messages, since)? {
         return Ok(Some((pos + 1..messages.len()).collect()));
     }
     if gitx::run(
@@ -1075,62 +1126,159 @@ fn normalize_datetime(raw: &str) -> String {
     raw.to_string()
 }
 
-/// A human-facing title: the `Subject` when present, else the first non-empty
-/// body line, else an explicit "(no subject)" placeholder. Never blank, so an
-/// inbox/read listing stays readable even for unlabeled messages.
-fn message_title(m: &Message) -> String {
-    if let Some(s) = m.subject().map(str::trim).filter(|s| !s.is_empty()) {
-        return s.to_string();
-    }
-    let first = m
-        .body
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("");
-    if first.is_empty() {
-        "(no subject)".to_string()
-    } else {
-        first.chars().take(60).collect()
+/// Split a leading `Subject:` line off a body. Many board messages follow the
+/// convention of putting the subject as the first BODY line (after the header
+/// block); rendering it as the subject AND as the excerpt doubled the cost of
+/// every inbox row.
+fn split_body_subject(body: &str) -> (Option<&str>, &str) {
+    let trimmed = body.trim_start_matches(['\n', '\r']);
+    let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    match first.trim().strip_prefix("Subject:") {
+        Some(subj) if !subj.trim().is_empty() => (Some(subj.trim()), rest),
+        _ => (None, body),
     }
 }
 
+/// The message subject: the `Subject` header, else a leading `Subject:` body
+/// line, else the first non-empty body line, else "(no subject)". Never blank.
+fn resolved_subject(m: &Message) -> String {
+    if let Some(s) = m.subject().map(str::trim).filter(|s| !s.is_empty()) {
+        return s.to_string();
+    }
+    if let (Some(s), _) = split_body_subject(&m.body) {
+        return s.to_string();
+    }
+    m.body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "(no subject)".to_string())
+}
+
+/// First content line of the body (after any `Subject:` line), clipped; `None`
+/// when it would merely repeat the subject.
+fn excerpt(m: &Message) -> Option<String> {
+    let (_, body) = split_body_subject(&m.body);
+    let first = body.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let subject = resolved_subject(m);
+    if first == subject || first.trim_start_matches("Subject:").trim() == subject {
+        return None;
+    }
+    Some(agntz::clip_to_words(first, 100))
+}
+
+/// Shortest unambiguous display prefix (min 8 chars) for every message id on
+/// the board, git-style. A UUID costs ~22 tokens, an 8-char prefix ~3; every
+/// command that takes an id resolves unique prefixes, so nothing is lost.
+fn short_ids(messages: &[Message]) -> HashMap<String, String> {
+    let mut ids: Vec<String> = messages
+        .iter()
+        .map(|m| normalize_message_id(&m.id))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let lcp = |a: &str, b: &str| a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let mut out = HashMap::new();
+    for (i, id) in ids.iter().enumerate() {
+        let mut need = 0;
+        if i > 0 {
+            need = need.max(lcp(id, &ids[i - 1]));
+        }
+        if i + 1 < ids.len() {
+            need = need.max(lcp(id, &ids[i + 1]));
+        }
+        let len = (need + 1).max(8).min(id.chars().count());
+        out.insert(id.clone(), id.chars().take(len).collect());
+    }
+    out
+}
+
+/// Resolve a user-supplied id to a message index: exact match (bracket
+/// insensitive) first, then a unique prefix (>= 4 chars). Ambiguous prefixes
+/// are an error listing the candidates, never a guess.
+fn resolve_message_index(messages: &[Message], id: &str) -> Result<Option<usize>> {
+    let want = normalize_message_id(id);
+    if let Some(i) = messages
+        .iter()
+        .position(|m| normalize_message_id(&m.id) == want)
+    {
+        return Ok(Some(i));
+    }
+    if want.chars().count() < 4 {
+        return Ok(None);
+    }
+    let hits: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| normalize_message_id(&m.id).starts_with(&want))
+        .map(|(i, _)| i)
+        .collect();
+    match hits.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        many => Err(anyhow!(
+            "id prefix '{want}' is ambiguous ({} matches: {}); use more characters",
+            many.len(),
+            many.iter()
+                .take(5)
+                .map(|i| normalize_message_id(&messages[*i].id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Listing timestamp: `MM-DD HH:MM` in the current year, `YYYY-MM-DD HH:MM`
+/// otherwise (exact seconds stay available via `read`).
+fn listing_time(raw: &str) -> String {
+    let norm = normalize_datetime(raw);
+    match chrono::DateTime::parse_from_rfc3339(&norm) {
+        Ok(dt) => {
+            let dt = dt.with_timezone(&chrono::Utc);
+            if dt.format("%Y").to_string() == chrono::Utc::now().format("%Y").to_string() {
+                dt.format("%m-%d %H:%M").to_string()
+            } else {
+                dt.format("%Y-%m-%d %H:%M").to_string()
+            }
+        }
+        Err(_) => norm,
+    }
+}
+
+/// Drop `null` members from a JSON object (recursively), so machine output
+/// doesn't spend tokens on absent optional fields.
+fn without_nulls(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, without_nulls(v)))
+                .collect(),
+        ),
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.into_iter().map(without_nulls).collect())
+        }
+        other => other,
+    }
+}
+
+/// Inbox row for `--json`: full ids (stable machine keys), resolved subject,
+/// excerpt only when it adds information, no per-row filesystem path.
 fn compact_message_json(m: &Message) -> serde_json::Value {
-    serde_json::json!({
+    let reply_to = m
+        .header("In-Reply-To")
+        .filter(|r| !r.is_empty() && *r != "none");
+    without_nulls(serde_json::json!({
         "message_id": m.id,
         "topic": m.topic,
         "sent_at": m.sent_at(),
         "from": m.header("From"),
-        "from_agent": m.header("From-Agent"),
-        "from_host": m.header("From-Host"),
         "to": m.header("To"),
-        "subject": m.subject(),
-        "title": message_title(m),
-        "excerpt": excerpt(&m.body),
-        "path": m.path.to_string_lossy(),
-    })
-}
-
-fn print_compact_message(m: &Message) {
-    println!(
-        "{topic}  {id}  {from}  {title}  - {excerpt}",
-        topic = m.topic,
-        id = m.id,
-        from = m.header("From").unwrap_or("?"),
-        title = message_title(m),
-        excerpt = excerpt(&m.body),
-    );
-    println!(
-        "    read: agntz board read {id}  (path: {path})",
-        id = m.id,
-        path = m.path.display()
-    );
-}
-
-#[must_use]
-fn excerpt(body: &str) -> String {
-    let first = body.lines().next().unwrap_or("").trim().to_string();
-    agntz::clip_to_words(&first, 80)
+        "subject": resolved_subject(m),
+        "excerpt": excerpt(m),
+        "in_reply_to": reply_to,
+    }))
 }
 
 /// Normalize a Message-ID for comparison: trim whitespace and strip RFC5322
@@ -1156,7 +1304,7 @@ pub(crate) fn search_messages(dir: &Path, query: &str, limit: usize) -> Result<V
         if hits.len() >= limit {
             break;
         }
-        let subject = m.subject().unwrap_or("").to_string();
+        let subject = resolved_subject(&m);
         let matched = m.id.to_ascii_lowercase().contains(&q)
             || m.topic.to_ascii_lowercase().contains(&q)
             || subject.to_ascii_lowercase().contains(&q)
@@ -1188,20 +1336,35 @@ fn normalize_message_id(id: &str) -> String {
 }
 
 fn find_message(dir: &Path, id: &str) -> Result<Message> {
-    let want = normalize_message_id(id);
     let messages = scan_messages(dir)?;
-    messages
-        .into_iter()
-        .find(|m| normalize_message_id(&m.id) == want)
-        .ok_or_else(|| {
-            anyhow!("no message with Message-ID {want} in board (check the id, or sync if it was posted by another agent)")
-        })
+    match resolve_message_index(&messages, id)? {
+        Some(i) => Ok(messages[i].clone()),
+        None => Err(anyhow!(
+            "no message with Message-ID {} in board (check the id, or sync if it was posted by another agent)",
+            normalize_message_id(id)
+        )),
+    }
 }
 
-fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Result<()> {
+fn handle_read(
+    ctx: &RuntimeContext,
+    name: Option<&str>,
+    message_id: &str,
+    raw: bool,
+) -> Result<()> {
     let repo = resolve_repo(ctx, name)?;
     let (dir, sync_warning) = open_repo(ctx, repo, true)?;
     let msg = find_message(&dir, message_id)?;
+
+    if raw {
+        surface_sync_warning(&sync_warning);
+        print!(
+            "{}",
+            fs::read_to_string(&msg.path)
+                .with_context(|| format!("reading {}", msg.path.display()))?
+        );
+        return Ok(());
+    }
 
     // Deterministic ordering of headers (message files are parsed into a HashMap).
     let mut header_items: Vec<(String, String)> = msg
@@ -1212,39 +1375,124 @@ fn handle_read(ctx: &RuntimeContext, name: Option<&str>, message_id: &str) -> Re
     header_items.sort();
 
     if ctx.common.json {
-        let mut headers = serde_json::Map::new();
-        for (k, v) in &header_items {
-            headers.insert(k.clone(), serde_json::json!(v));
-        }
-        let payload = serde_json::json!({
+        // The headers map is the source of truth; no duplicated per-field
+        // copies of it. The body is verbatim (machine fidelity).
+        let headers: serde_json::Map<String, serde_json::Value> = header_items
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+            .collect();
+        let payload = without_nulls(serde_json::json!({
             "repo": repo.name,
             "message_id": msg.id,
             "topic": msg.topic,
             "path": msg.path.to_string_lossy(),
-            "from": msg.header("From"),
-            "from_agent": msg.header("From-Agent"),
-            "from_host": msg.header("From-Host"),
-            "to": msg.header("To"),
-            "subject": msg.subject(),
-            "sent_at": msg.sent_at(),
+            "subject": resolved_subject(&msg),
             "headers": headers,
             "body": msg.body,
             "sync_warning": sync_warning,
-        });
+        }));
         readout::emit("board/read", true, None, payload);
         return Ok(());
     }
 
     surface_sync_warning(&sync_warning);
-    for (k, v) in &header_items {
-        println!("{k}: {v}");
+    print_message_compact(&msg, &dir);
+    Ok(())
+}
+
+/// Compact rendering of a message that keeps EVERY header value but drops the
+/// key boilerplate: provenance collapses into one `from:` line, the reply
+/// target is a resolvable short id, and a leading `Subject:` body line is
+/// shown once as the subject. Use `--raw` for the byte-exact file.
+fn print_message_compact(msg: &Message, dir: &Path) {
+    const CONSUMED: &[&str] = &[
+        "Message-ID",
+        "Sent-At",
+        "From",
+        "From-Agent",
+        "From-Host",
+        "From-Machine",
+        "From-Session-ID",
+        "From-Session-Name",
+        "From-Workspace",
+        "To",
+        "In-Reply-To",
+        "Subject",
+    ];
+    let h = |k: &str| msg.header(k).filter(|v| !v.is_empty());
+
+    println!(
+        "{}  {}  {}",
+        normalize_message_id(&msg.id),
+        msg.topic,
+        h("Sent-At").map_or_else(|| "-".to_string(), normalize_datetime)
+    );
+
+    let mut prov: Vec<String> = Vec::new();
+    match (h("From-Agent"), h("From-Host")) {
+        (Some(a), Some(host)) => prov.push(format!("{a}@{host}")),
+        (Some(a), None) => prov.push(a.to_string()),
+        (None, Some(host)) => prov.push(format!("@{host}")),
+        (None, None) => {}
     }
+    if let Some(machine) = h("From-Machine")
+        && Some(machine) != h("From-Host")
+    {
+        prov.push(format!("machine {machine}"));
+    }
+    if let Some(ws) = h("From-Workspace") {
+        prov.push(format!("workspace {ws}"));
+    }
+    if let Some(sid) = h("From-Session-ID") {
+        match h("From-Session-Name") {
+            Some(n) => prov.push(format!("session {sid} \"{n}\"")),
+            None => prov.push(format!("session {sid}")),
+        }
+    } else if let Some(n) = h("From-Session-Name") {
+        prov.push(format!("session \"{n}\""));
+    }
+    let from = h("From").unwrap_or("?");
+    if prov.is_empty() {
+        println!("from: {from}");
+    } else {
+        println!("from: {from} ({})", prov.join(", "));
+    }
+    if let Some(to) = h("To") {
+        println!("to: {to}");
+    }
+    if let Some(re) = h("In-Reply-To").filter(|r| *r != "none") {
+        // Short form when it resolves uniquely on this board.
+        let shown = scan_messages(dir)
+            .ok()
+            .map(|all| short_ids(&all))
+            .and_then(|m| m.get(&normalize_message_id(re)).cloned())
+            .unwrap_or_else(|| re.to_string());
+        println!("re: {shown}");
+    }
+    for (k, v) in msg
+        .headers
+        .iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+    {
+        if !CONSUMED.contains(&k.as_str()) {
+            println!("{k}: {v}");
+        }
+    }
+    println!("subject: {}", resolved_subject(msg));
     println!();
-    print!("{}", msg.body);
-    if !msg.body.ends_with('\n') {
+
+    // Body without the leading `Subject:` line (already shown above).
+    let (body_subject, rest) = split_body_subject(&msg.body);
+    let body = if body_subject.is_some() {
+        rest
+    } else {
+        msg.body.as_str()
+    };
+    let body = body.trim_start_matches(['\n', '\r']);
+    print!("{body}");
+    if !body.ends_with('\n') {
         println!();
     }
-    Ok(())
 }
 
 fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
@@ -2369,6 +2617,64 @@ Body.
 ";
         let err = validate_message(msg).unwrap_err();
         assert!(err.to_string().contains("Message-ID"));
+    }
+
+    fn msg(id: &str, body: &str) -> Message {
+        Message {
+            id: id.to_string(),
+            topic: "t".to_string(),
+            path: PathBuf::new(),
+            headers: HashMap::new(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn short_ids_are_min_8_and_extend_on_collision() {
+        let all = vec![
+            msg("abcdef12-0000-0000-0000-000000000001", ""),
+            msg("abcdef12-0000-0000-0000-000000000002", ""),
+            msg("99999999-1111-1111-1111-111111111111", ""),
+        ];
+        let s = short_ids(&all);
+        assert_eq!(s["99999999-1111-1111-1111-111111111111"], "99999999");
+        // shared 35-char prefix -> must extend to stay unique
+        let a = &s["abcdef12-0000-0000-0000-000000000001"];
+        let b = &s["abcdef12-0000-0000-0000-000000000002"];
+        assert_ne!(a, b);
+        assert!(a.len() > 8);
+    }
+
+    #[test]
+    fn prefix_resolution_exact_unique_ambiguous_and_too_short() {
+        let all = vec![
+            msg("abcdef12-0000-0000-0000-000000000001", ""),
+            msg("abcdef12-0000-0000-0000-000000000002", ""),
+            msg("99999999-1111-1111-1111-111111111111", ""),
+        ];
+        assert_eq!(
+            resolve_message_index(&all, "<99999999-1111-1111-1111-111111111111>").unwrap(),
+            Some(2)
+        );
+        assert_eq!(resolve_message_index(&all, "9999").unwrap(), Some(2));
+        let err = resolve_message_index(&all, "abcdef12")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ambiguous") && err.contains("2 matches"),
+            "{err}"
+        );
+        assert_eq!(resolve_message_index(&all, "999").unwrap(), None);
+    }
+
+    #[test]
+    fn body_subject_line_is_the_subject_and_not_repeated() {
+        let m = msg("x", "Subject: Kickoff plan\n\nFirst real line.\n");
+        assert_eq!(resolved_subject(&m), "Kickoff plan");
+        assert_eq!(excerpt(&m).as_deref(), Some("First real line."));
+        let only = msg("y", "Just one line.\n");
+        assert_eq!(resolved_subject(&only), "Just one line.");
+        assert_eq!(excerpt(&only), None);
     }
 
     #[test]
