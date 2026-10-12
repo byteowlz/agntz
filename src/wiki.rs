@@ -346,13 +346,11 @@ fn split_front_matter(raw: &str) -> (Option<&str>, &str) {
 /// Fetch + fast-forward the wiki to the remote before a read/write so an agent
 /// never operates on a stale clone (docs' "search before creating" flow).
 fn sync_wiki(dir: &Path, repo: &RepoConfig) -> Result<()> {
-    if let Some(_) = repo.remote.as_deref().filter(|r| !r.is_empty())
-        && gitx::has_remote(dir, "origin")
+    let _ = repo;
+    if let Some((remote, branch)) = gitx::publish_target(dir)
+        && let Some(w) = gitx::sync_for_read(dir, &remote, &branch)?
     {
-        let branch = gitx::current_branch(dir).unwrap_or_else(|| "master".to_string());
-        if let Some(w) = gitx::sync_for_read(dir, "origin", &branch)? {
-            eprintln!("sync note: {w}");
-        }
+        eprintln!("sync note: {w}");
     }
     Ok(())
 }
@@ -1055,7 +1053,7 @@ fn stamp_updater(front: &mut BTreeMap<String, String>, updater: &crate::ctx::Pro
 
 fn write_and_publish(
     _ctx: &RuntimeContext,
-    repo: &RepoConfig,
+    _repo: &RepoConfig,
     dir: &Path,
     page_id: &str,
     page_path: &Path,
@@ -1075,19 +1073,22 @@ fn write_and_publish(
 
     let mut published = false;
     let mut push_error = None;
-    if !no_push
-        && repo.remote.as_deref().filter(|r| !r.is_empty()).is_some()
-        && gitx::has_remote(dir, "origin")
-    {
-        let branch = gitx::current_branch(dir).unwrap_or_else(|| "master".to_string());
-        match gitx::push(dir, "origin", &branch) {
+    let target = if no_push {
+        None
+    } else {
+        gitx::publish_target(dir)
+    };
+    if let Some((remote, branch)) = &target {
+        match gitx::push(dir, remote, branch) {
             Ok(()) => published = true,
             Err(e) => push_error = Some(format!("{e:#}")),
         }
     }
     if let Some(err) = push_error {
         eprintln!("push failed: {err}");
-        eprintln!("recover by pushing manually: git push origin");
+        if let Some((remote, branch)) = &target {
+            eprintln!("recover by pushing manually: git push {remote} {branch}");
+        }
     }
     let _ = published;
     Ok(())
@@ -1191,23 +1192,21 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     }
     let branch = gitx::current_branch(&dir).unwrap_or_else(|| "HEAD".to_string());
     let dirty = gitx::is_dirty(&dir);
-    let remote = repo.remote.as_deref().filter(|s| !s.is_empty());
-    let has_tracking = remote.is_some()
-        && gitx::has_remote(&dir, "origin")
-        && gitx::run(
-            &dir,
-            &["rev-parse", "--verify", &format!("origin/{branch}")],
-        )
-        .ok;
-    let ahead = if has_tracking {
-        gitx::commits_ahead(&dir, "origin", &branch).unwrap_or(0)
-    } else {
-        0
+    // The remote that git actually publishes to (never an assumed `origin`).
+    let remote = gitx::remote_name(&dir);
+    let has_tracking = remote
+        .as_deref()
+        .is_some_and(|r| gitx::run(&dir, &["rev-parse", "--verify", &format!("{r}/{branch}")]).ok);
+    let ahead = match (&remote, has_tracking) {
+        (Some(r), true) => gitx::commits_ahead(&dir, r, &branch).unwrap_or(0),
+        _ => 0,
     };
     let last = gitx::run(&dir, &["log", "-1", "--pretty=%h %s"])
         .out()
         .to_string();
-    let state = if remote.is_some() && !has_tracking {
+    let state = if remote.is_none() {
+        "local-only (no git remote)"
+    } else if !has_tracking {
         "remote configured but nothing pushed yet"
     } else if ahead > 0 {
         "locally committed, not remotely published"
@@ -1419,8 +1418,10 @@ fn handle_register(
         return Err(anyhow!("{} is not a git repository", expanded.display()));
     }
     if let Some(url) = remote
-        && !gitx::has_remote(&expanded, "origin")
+        && gitx::run(&expanded, &["remote"]).out().is_empty()
     {
+        // Only when the repo has no remote at all: never add a second remote
+        // next to an existing one with a different name.
         gitx::run_need(&expanded, &["remote", "add", "origin", url])?;
     }
     // Ensure the layout: create a missing empty pages/ dir (clone of an
@@ -1534,7 +1535,14 @@ fn handle_config_cmd(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     }
     println!("wiki:    {}", repo.name);
     println!("path:    {}", repo.path);
-    println!("remote:  {}", repo.remote.as_deref().unwrap_or("(none)"));
+    let dir = std::path::Path::new(&repo.path);
+    match gitx::remote_name(dir) {
+        Some(r) => println!(
+            "remote:  {r} ({})",
+            gitx::run(dir, &["remote", "get-url", &r]).out()
+        ),
+        None => println!("remote:  (none - local-only)"),
+    }
     println!("source:  {source}");
     Ok(())
 }

@@ -276,5 +276,24 @@ check "test \"\${#SHORT}\" -ge 8 && test \"\${#SHORT}\" -lt 36" "inbox row id is
 check "$AGNTZ board read --name tp \"$SHORT\" | grep -q 'Alpha one'" "read resolves the short prefix"
 check "$AGNTZ board read --name tp \"$SHORT\" --raw | grep -q '^Message-ID: '" "read --raw prints the verbatim file"
 
+echo "[29] a remote not named origin (e.g. forgejo) is used for push, fetch and status"
+git init -q --bare -b main "$WORK/fbare.git"
+$AGNTZ board init fj "$WORK/fj" --remote "$WORK/fbare.git" --role agent >/dev/null 2>&1
+git -C "$WORK/fj" remote rename origin forgejo
+check "test \"\$(git -C '$WORK/fj' remote)\" = forgejo" "fixture: only remote is forgejo"
+$AGNTZ board post kick --name fj --subject "Forgejo kickoff" --body "k" >/dev/null 2>&1
+check "git -C '$WORK/fbare.git' log --oneline main | grep -q 'post new topic kick'" "post was pushed to the forgejo remote"
+check "! $AGNTZ board status --name fj | grep -q 'local-only'" "status does not claim local-only"
+check "$AGNTZ board status --name fj | grep -q 'remote:   forgejo'" "status names the forgejo remote"
+# a clone whose remote is named forgejo, registered WITHOUT --remote
+git clone -q -o forgejo "$WORK/fbare.git" "$WORK/fj2"
+$AGNTZ board register fj2 "$WORK/fj2" --role agent >/dev/null 2>&1
+check "test \"\$(git -C '$WORK/fj2' remote)\" = forgejo" "register did not add a second remote"
+$AGNTZ board post later --name fj --subject "After clone" --body "l" >/dev/null 2>&1
+check "$AGNTZ board inbox --name fj2 --role all --since all | grep -q 'After clone'" "read on the forgejo clone fetched the new post"
+# --remote on a repo that already has a forgejo remote must not add origin
+$AGNTZ board register fj3 "$WORK/fj2" --remote "$WORK/fbare.git" --role agent >/dev/null 2>&1
+check "test \"\$(git -C '$WORK/fj2' remote | wc -l)\" -eq 1" "register --remote did not add origin next to forgejo"
+
 echo "=== Result: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ] || exit 1

@@ -95,21 +95,6 @@ pub fn current_branch(dir: &Path) -> Option<String> {
         .filter(|s| s != "HEAD")
 }
 
-/// Resolve the configured remote URL for `name`, if set.
-#[must_use]
-pub fn remote_url(dir: &Path, name: &str) -> Option<String> {
-    let out = run(dir, &["remote", "get-url", name]);
-    out.ok
-        .then(|| out.out().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Whether a remote by `name` is configured.
-#[must_use]
-pub fn has_remote(dir: &Path, name: &str) -> bool {
-    remote_url(dir, name).is_some()
-}
-
 /// Number of commits on HEAD that are not pushed to `remote`/`branch`.
 #[must_use]
 pub fn commits_ahead(dir: &Path, remote: &str, branch: &str) -> Option<usize> {
@@ -219,15 +204,56 @@ pub fn fetch(dir: &Path, remote: &str) -> Result<()> {
 /// missing/unreachable). The caller should surface that warning so an empty
 /// inbox is never mistaken for "nothing new" when the sync actually failed.
 /// A `sync_for_read` error is reserved for genuinely fatal local problems.
-/// The `origin` URL of a repo, if one is configured (used to inherit a remote
-/// when registering a repo that was already cloned).
+/// The git remote a repo publishes to: the current branch's upstream remote,
+/// else `origin`, else the only remote. `None` when there is no remote or the
+/// choice would be a guess (several remotes, none tracked, none named origin).
+///
+/// Never assume `origin`: a board cloned from (or pushed to) a remote named
+/// e.g. `forgejo` would otherwise be treated as local-only, so reads silently
+/// skip the fetch and writes silently skip the push.
+pub fn remote_name(dir: &Path) -> Option<String> {
+    let upstream = run(
+        dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    );
+    if upstream.ok
+        && let Some((remote, _branch)) = upstream.out().split_once('/')
+        && !remote.is_empty()
+    {
+        return Some(remote.to_string());
+    }
+    let remotes: Vec<String> = run(dir, &["remote"])
+        .out()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if remotes.iter().any(|r| r == "origin") {
+        return Some("origin".to_string());
+    }
+    match remotes.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Where a repo syncs and publishes: (remote, current branch). `None` when
+/// there is no remote (see [`remote_name`]) or HEAD is detached; never guesses
+/// a remote or branch name.
+pub fn publish_target(dir: &Path) -> Option<(String, String)> {
+    Some((remote_name(dir)?, current_branch(dir)?))
+}
+
+/// The URL of the repo's publishing remote (see [`remote_name`]); used to
+/// inherit the remote when registering a repo that was already cloned.
 pub fn remote_origin(dir: &Path) -> Option<String> {
-    let s = run(dir, &["remote", "get-url", "origin"]).out().to_string();
-    let s = s.trim();
-    if s.is_empty() {
+    let name = remote_name(dir)?;
+    let url = run(dir, &["remote", "get-url", &name]).out().to_string();
+    let url = url.trim();
+    if url.is_empty() {
         None
     } else {
-        Some(s.to_string())
+        Some(url.to_string())
     }
 }
 

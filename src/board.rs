@@ -755,10 +755,9 @@ fn open_repo(
         ));
     }
     let mut sync_warning = None;
-    if fetch && let Some(_) = repo.remote.as_deref().filter(|r| !r.is_empty()) {
-        // Fetch AND fast-forward so reads see other agents' messages.
-        let branch = gitx::current_branch(&path).unwrap_or_else(|| "master".to_string());
-        sync_warning = gitx::sync_for_read(&path, "origin", &branch)?;
+    // Fetch AND fast-forward so reads see other agents' messages.
+    if fetch && let Some((remote, branch)) = gitx::publish_target(&path) {
+        sync_warning = gitx::sync_for_read(&path, &remote, &branch)?;
     }
     Ok((path, sync_warning))
 }
@@ -1503,35 +1502,36 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     }
     let branch = gitx::current_branch(&dir).unwrap_or_else(|| "HEAD".to_string());
     let dirty = gitx::is_dirty(&dir);
-    let remote = repo.remote.as_deref().filter(|s| !s.is_empty());
-    let has_tracking = remote.is_some()
-        && gitx::has_remote(&dir, "origin")
-        && gitx::run(
-            &dir,
-            &["rev-parse", "--verify", &format!("origin/{branch}")],
-        )
-        .ok;
-    let ahead = if has_tracking {
-        gitx::commits_ahead(&dir, "origin", &branch).unwrap_or(0)
-    } else {
-        0
+    // The remote that git actually publishes to (never an assumed `origin`).
+    let remote = gitx::remote_name(&dir);
+    let tracking_ref = remote.as_deref().map(|r| format!("{r}/{branch}"));
+    let has_tracking = tracking_ref
+        .as_deref()
+        .is_some_and(|t| gitx::run(&dir, &["rev-parse", "--verify", t]).ok);
+    let ahead = match (&remote, has_tracking) {
+        (Some(r), true) => gitx::commits_ahead(&dir, r, &branch).unwrap_or(0),
+        _ => 0,
     };
-    let unpushed = if has_tracking {
-        gitx::unpushed_commits(&dir, "origin", &branch)
-    } else {
-        Vec::new()
+    let unpushed = match (&remote, has_tracking) {
+        (Some(r), true) => gitx::unpushed_commits(&dir, r, &branch),
+        _ => Vec::new(),
     };
     let last_commit = gitx::run(&dir, &["log", "-1", "--pretty=%h %s"])
         .out()
         .to_string();
 
-    let state = if remote.is_some() && !has_tracking {
+    let state = if remote.is_none() {
+        "local-only (no git remote)"
+    } else if !has_tracking {
         "remote configured but nothing pushed yet (no tracking ref)"
     } else if ahead > 0 {
         "locally committed, not remotely published"
     } else {
         "in sync with remote"
     };
+    let remote_url = remote
+        .as_deref()
+        .map(|r| gitx::run(&dir, &["remote", "get-url", r]).out().to_string());
 
     if ctx.common.json {
         let payload = serde_json::json!({
@@ -1539,6 +1539,7 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
             "path": repo.path,
             "branch": branch,
             "remote": remote,
+            "remote_url": remote_url,
             "dirty": dirty,
             "commits_ahead": ahead,
             "unpushed": unpushed,
@@ -1553,7 +1554,10 @@ fn handle_status(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     println!("board:    {}", repo.name);
     println!("path:     {}", repo.path);
     println!("branch:   {branch}");
-    println!("remote:   {}", remote.unwrap_or("(none - local-only)"));
+    match (&remote, &remote_url) {
+        (Some(r), Some(url)) => println!("remote:   {r} ({url})"),
+        _ => println!("remote:   (none - local-only)"),
+    }
     println!("dirty:    {dirty}");
     println!("ahead:    {ahead} unpushed commit(s)");
     println!("last:     {last_commit}");
@@ -1608,9 +1612,8 @@ fn handle_reply(
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     let mut sync_warning = None;
-    if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
-        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
-        sync_warning = gitx::sync_for_read(&dir, "origin", &branch)?;
+    if let Some((remote, branch)) = gitx::publish_target(&dir) {
+        sync_warning = gitx::sync_for_read(&dir, &remote, &branch)?;
     }
     let parent = find_message(&dir, message_id)?;
     prepare_tree(&dir)?;
@@ -1726,9 +1729,8 @@ fn handle_reply(
     let local_committed = true;
     let mut published = false;
     let mut push_error = None;
-    if !no_push && repo.remote.as_deref().filter(|r| !r.is_empty()).is_some() {
-        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
-        match push_with_race_retry(&dir, &branch) {
+    if !no_push && let Some((remote, branch)) = gitx::publish_target(&dir) {
+        match push_with_race_retry(&dir, &remote, &branch) {
             Ok(()) => published = true,
             Err(e) => push_error = Some(format!("{e:#}")),
         }
@@ -1772,7 +1774,12 @@ fn handle_reply(
     );
     if let Some(err) = push_error {
         eprintln!("push failed: {err}");
-        eprintln!("recover by pushing manually: git push origin");
+        match gitx::publish_target(&dir) {
+            Some((remote, branch)) => {
+                eprintln!("recover by pushing manually: git push {remote} {branch}");
+            }
+            None => eprintln!("recover by pushing manually: git push"),
+        }
     }
     Ok(())
 }
@@ -1799,9 +1806,8 @@ async fn handle_post(
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     let mut sync_warning = None;
-    if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
-        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "main".to_string());
-        sync_warning = gitx::sync_for_read(&dir, "origin", &branch)?;
+    if let Some((remote, branch)) = gitx::publish_target(&dir) {
+        sync_warning = gitx::sync_for_read(&dir, &remote, &branch)?;
     }
     prepare_tree(&dir)?;
     gitx::ensure_git()?;
@@ -1907,9 +1913,8 @@ async fn handle_post(
 
     let mut published = false;
     let mut push_error = None;
-    if !no_push && repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
-        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "main".to_string());
-        match push_with_race_retry(&dir, &branch) {
+    if !no_push && let Some((remote, branch)) = gitx::publish_target(&dir) {
+        match push_with_race_retry(&dir, &remote, &branch) {
             Ok(()) => published = true,
             Err(e) => push_error = Some(format!("{e:#}")),
         }
@@ -1998,9 +2003,8 @@ fn handle_ack(
     let repo = resolve_repo(ctx, name)?;
     let dir = PathBuf::from(&repo.path);
     let mut sync_warning = None;
-    if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
-        let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
-        sync_warning = gitx::sync_for_read(&dir, "origin", &branch)?;
+    if let Some((remote, branch)) = gitx::publish_target(&dir) {
+        sync_warning = gitx::sync_for_read(&dir, &remote, &branch)?;
     }
     let msg = find_message(&dir, message_id)?;
     let identity = detect_identity(role_override, repo.role.as_deref());
@@ -2040,9 +2044,8 @@ fn handle_ack(
         gitx::ensure_identity(&dir)?;
         gitx::add_one(&dir, &rel)?;
         gitx::commit(&dir, &format!("board: ack {}", msg.id))?;
-        if repo.remote.as_deref().is_some_and(|r| !r.is_empty()) {
-            let branch = gitx::current_branch(&dir).unwrap_or_else(|| "master".to_string());
-            match push_with_race_retry(&dir, &branch) {
+        if let Some((remote, branch)) = gitx::publish_target(&dir) {
+            match push_with_race_retry(&dir, &remote, &branch) {
                 Ok(()) => published = true,
                 Err(e) => push_error = Some(format!("{e:#}")),
             }
@@ -2099,18 +2102,18 @@ fn handle_ack(
 
 /// Push to origin, and on a race failure fetch + rebase only our own unpushed
 /// commits and retry (bounded). Never force-pushes.
-fn push_with_race_retry(dir: &Path, branch: &str) -> Result<()> {
+fn push_with_race_retry(dir: &Path, remote: &str, branch: &str) -> Result<()> {
     let mut attempt = 0;
     loop {
-        match gitx::push(dir, "origin", branch) {
+        match gitx::push(dir, remote, branch) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 attempt += 1;
                 if attempt >= 3 {
                     return Err(e);
                 }
-                gitx::fetch(dir, "origin")?;
-                gitx::rebase(dir, "origin", branch)?;
+                gitx::fetch(dir, remote)?;
+                gitx::rebase(dir, remote, branch)?;
             }
         }
     }
@@ -2128,11 +2131,10 @@ pub(crate) fn publish_initial(
     let Some(remote) = remote.filter(|r| !r.is_empty()) else {
         return Ok(());
     };
-    if !gitx::has_remote(dir, "origin") {
+    let Some((remote_name, branch)) = gitx::publish_target(dir) else {
         return Ok(());
-    }
-    let branch = gitx::current_branch(dir).unwrap_or_else(|| "main".to_string());
-    match gitx::run_need(dir, &["push", "-u", "origin", &branch]) {
+    };
+    match gitx::run_need(dir, &["push", "-u", &remote_name, &branch]) {
         Ok(_) => {
             log::info!("initialized {kind} {name}: pushed to origin/{branch}");
             repair_remote_head(Path::new(remote), &branch);
@@ -2383,8 +2385,10 @@ fn handle_register(
 
     // Attach remote without overwriting an existing one.
     if let Some(url) = remote
-        && !gitx::has_remote(&expanded, "origin")
+        && gitx::run(&expanded, &["remote"]).out().is_empty()
     {
+        // Only when the repo has no remote at all: never add a second remote
+        // next to an existing one with a different name (e.g. `forgejo`).
         gitx::run_need(&expanded, &["remote", "add", "origin", url])?;
     }
 
@@ -2507,7 +2511,14 @@ fn handle_config_cmd(ctx: &RuntimeContext, name: Option<&str>) -> Result<()> {
     }
     println!("board:    {}", repo.name);
     println!("path:     {}", repo.path);
-    println!("remote:   {}", repo.remote.as_deref().unwrap_or("(none)"));
+    let dir = std::path::Path::new(&repo.path);
+    match gitx::remote_name(dir) {
+        Some(r) => println!(
+            "remote:   {r} ({})",
+            gitx::run(dir, &["remote", "get-url", &r]).out()
+        ),
+        None => println!("remote:   (none - local-only)"),
+    }
     println!("source:   {source}");
     Ok(())
 }
